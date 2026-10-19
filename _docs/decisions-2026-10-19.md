@@ -41,14 +41,20 @@
 - Ұсынылған дизайннан брендтің көрнекілігі, фон сапасы, навигация және анық әрекет батырмалары алынады. MAXBALL EDTECH-тің негізгі тәжірибесі ашық кері байланыс болып қалады.
 - Қайта жүктеу, қате мәтіндері, уақытша сілтемелердің қауіпсіз мерзімі және техникалық тексерулер іске асыру кезінде қауіпсіз әдепкі мәндермен нақтыланады.
 
-## Әлі нақтыланатындар
+## Кейінгі Жауаптар, 2026-10-20
 
-- Оқытушыға мәтіндік пікір міндетті ме; жеке бағалар мен пікір авторларының ашық көрінуі қандай? 1-5 шкаласы мен мәтіндік пікір мүмкіндігі бекітілген.
-- Есептерді CSV немесе Excel файлына экспорттау керек пе? Қолданушы есептеу ұсыныстарын қабылдады, экспорт түрін таңдамады.
-- Vercel және Supabase аккаунттары, айлық бюджет және деректерді орналастыру аймағы.
+- Оқытушыға мәтіндік пікір ерікті және атымен көрсетіледі.
+- Статистиканың Excel экспорты бекітілді.
+- Vercel және Supabase аккаунттары бар; қолданушы кіріп, авторизация дайындайтынын айтты. Нақты қосылу әлі орындалған жоқ.
+- Алғашқы нақты басшылық email-ы: `maksat.workspace@gmail.com`.
+- Қызметтер бюджеті қызметкерлер жалақысы емес. Жалақы деректерін жариялау сұралған жоқ; олар сайтқа енгізілмейді.
+
+## Әлі Нақтыланатындар
+
+- Қызметтерге айлық бюджет және деректерді орналастыру аймағы; аккаунттар бар, бірақ нақты жобалар әлі қосылмаған.
 - Gmail арқылы жіберуге арналған қорғалған авторизация. Email мекенжайын беру авторизация бапталды дегенді білдірмейді.
 - ИИ провайдері, модель және қорғалған API қолжетімділігі.
-- Демоның орнына жария ортада ашылатын нақты алғашқы басшылық аккаунты.
+- Нақты алғашқы басшылық профилінің аты-жөні мен телефоны; email жоғарыда бекітілген.
 
 ## Демо мазмұнының бағыты
 
@@ -71,3 +77,19 @@ Use case: logo-brand. Create a single original logo mark for MAXBALL EDTECH, a K
 ```
 
 Басқа сайттың бренд белгісі немесе қолданушы аккаунтының скриншоттары осы активтің бөлігі ретінде көшірілмейді.
+
+## Фон Активі
+
+`public/space-background.png`, 1672×941: жоба үшін кіріктірілген imagegen арқылы жасалған жаңа bitmap. Басқа сайттан сурет көшірілген жоқ. Генерация сипаттамасы:
+
+```text
+Use case: stylized-concept
+Asset type: original bitmap background for the MAXBALL EDTECH feedback web app, behind crisp white forum/dashboard working surfaces.
+Primary request: Create exactly one polished, restrained cosmic sky over the curved Earth horizon, in a wide 16:9 landscape composition.
+Scene/backdrop: Deep midnight space transitioning into rich cobalt near the Earth, scattered with fine, sparse, tiny realistic stars. A broad gently curved Earth horizon occupies the lower quarter, with subdued blue planetary surface and very faint natural cloud texture.
+Style/medium: Refined realistic digital matte painting, smooth atmospheric depth and clean bitmap detail.
+Composition/framing: Unframed edge-to-edge background. Spacious quiet center and upper sky, balanced across the full width. Earth curvature remains legible at the edges when the center is covered by a dashboard.
+Lighting/mood: Calm, low-distraction cosmic ambience; a narrow soft cyan atmospheric rim along the horizon, controlled brightness, no intense focal flare.
+Color palette: Midnight navy, deep space black, restrained cobalt blue, subtle cyan horizon light.
+Constraints: Background scenery only; no text, letters, logos, watermark, interface, panels, cartoon characters, people, spacecraft, extra planets, decorative orbs, bright nebulae, starbursts, lens flare, bokeh, or marketing hero composition. Opaque background. Generate one image only.
+```
