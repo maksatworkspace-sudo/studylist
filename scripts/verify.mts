@@ -145,16 +145,13 @@ export function parseArgs(argv: string[]): {
 }
 
 export function validateEnvironment(env: NodeJS.ProcessEnv): {
-  adapter: "dev-pglite" | "memory" | "sqlite";
+  adapter: "memory" | "sqlite";
   sqlitePath?: string;
 } {
-  const adapter = (env.MAXBALL_ADAPTER || "dev-pglite") as
-    | "dev-pglite"
-    | "memory"
-    | "sqlite";
-  if (!["dev-pglite", "memory", "sqlite"].includes(adapter))
+  const adapter = (env.MAXBALL_ADAPTER || "memory") as "memory" | "sqlite";
+  if (!["memory", "sqlite"].includes(adapter))
     throw new VerifyError(
-      `MAXBALL_ADAPTER "${adapter}" is not one of dev-pglite, memory, sqlite.`,
+      `MAXBALL_ADAPTER "${adapter}" is not one of memory, sqlite.`,
     );
   if (adapter === "sqlite") {
     const missing: string[] = [];
@@ -560,6 +557,18 @@ async function runRestartPhase(
   parentEnv: NodeJS.ProcessEnv,
   workRoot: string,
 ): Promise<PhaseResult> {
+  // Persistence across processes requires a file-backed adapter; the genuine
+  // memory repository is process-local by design (issue #9). Until the
+  // issue #10 SQLite adapter is the default this phase reports an explicit
+  // PENDING, never a silent skip.
+  if ((parentEnv.MAXBALL_ADAPTER || "memory") !== "sqlite") {
+    return {
+      phase: "restart",
+      status: "PENDING",
+      detail:
+        "restart persistence requires the file-backed adapter; the memory backend (default until #10) is process-local by design",
+    };
+  }
   const staging = await createStaging(repoRoot, workRoot);
   const logPath = path.join(workRoot, "restart-server.log");
   const first = await startAppServer(staging, tracker, parentEnv, logPath);

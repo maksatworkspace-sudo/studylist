@@ -41,8 +41,8 @@ describe("verify runner argument parsing", () => {
 });
 
 describe("verify runner environment validation", () => {
-  it("defaults to the isolated dev baseline adapter", () => {
-    expect(validateEnvironment({})).toEqual({ adapter: "dev-pglite" });
+  it("defaults to the genuine memory adapter", () => {
+    expect(validateEnvironment({})).toEqual({ adapter: "memory" });
   });
 
   it("refuses an incomplete sqlite adapter instead of falling back", () => {

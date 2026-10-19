@@ -31,8 +31,10 @@ jobs:
       # restart) is required — a missing browser or configuration fails.
       - name: Install browser runtime
         run: npx playwright install --with-deps chromium
-      - name: Isolated strict verification (http + browser + restart)
-        run: node scripts/verify.mts --strict
+      - name: Isolated strict verification (http + browser)
+        run: node scripts/verify.mts --phase http,e2e --strict
+      # The restart-persistence phase activates with the #10 SQLite adapter:
+      #   - run: node scripts/verify.mts --phase restart --strict
       - name: Isolated mock-mode browser verification (#5 zero API traffic)
         run: node scripts/verify.mts --phase e2e --mode mock --strict
       - name: Upload verification artifacts

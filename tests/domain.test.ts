@@ -1,9 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { PGlite } from "@electric-sql/pglite";
+import { beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import type { Database } from "../src/server/db";
 import type { Context } from "../src/server/context";
+import type { Store } from "../src/server/store/types";
 import { action } from "../src/server/actions";
 import { authAction } from "../src/server/auth";
 import { boot, detail, statistics } from "../src/server/queries";
@@ -17,49 +15,39 @@ import { fileAction } from "../src/server/files";
 import type { Viewer } from "../src/lib/types";
 import { postgresOptions } from "../src/server/pg-config";
 
-const engine = new PGlite();
-let db: Database;
+let db: Store;
 let guest: Context,
   user: Context,
   teacher: Context,
   admin: Context,
   leader: Context;
 beforeAll(async () => {
-  await engine.waitReady;
-  await engine.exec(
-    await readFile(
-      new URL(
-        "../supabase/migrations/202610190001_initial.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  const wrap = (client: Pick<PGlite, "query">): Database => ({
-    query: async <T>(sql: string, args: unknown[] = []) =>
-      (await client.query(sql, args)).rows as T[],
-    transaction: (fn) => engine.transaction((tx) => fn(wrap(tx))),
-  });
-  db = wrap(engine);
+  const { MemoryStore } = await import("../src/server/store/memory");
+  db = new MemoryStore();
   await seed(db);
   async function ctx(n?: number): Promise<Context> {
     const sessionHash = hash(randomUUID());
-    await db.query(
-      "INSERT INTO private.sessions(token_hash,profile_id,expires_at) VALUES($1,$2,now()+interval '1 day')",
-      [sessionHash, n ? demoId(n) : null],
-    );
+    await db.insert("sessions", {
+      token_hash: sessionHash,
+      profile_id: n ? demoId(n) : null,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+      provider_session: null,
+    });
+    const profile = n ? await db.get("profiles", demoId(n)) : undefined;
     return {
-      db,
+      store: db,
       sessionHash,
       ip: randomUUID(),
       demo: true,
-      viewer: n
-        ? (
-            await db.query<Viewer>(
-              "SELECT id,name,email,phone,role,verified FROM profiles WHERE id=$1",
-              [demoId(n)],
-            )
-          )[0]
+      viewer: profile
+        ? ({
+            id: String(profile.id),
+            name: String(profile.name),
+            email: String(profile.email),
+            phone: String(profile.phone),
+            role: profile.role,
+            verified: Boolean(profile.verified),
+          } as Viewer)
         : null,
     };
   }
@@ -68,9 +56,6 @@ beforeAll(async () => {
   teacher = await ctx(4);
   admin = await ctx(5);
   leader = await ctx(6);
-});
-afterAll(async () => {
-  await engine.close();
 });
 const input = (extra: Record<string, unknown> = {}) => ({
   requestId: randomUUID(),
@@ -101,15 +86,10 @@ describe("anonymous feedback and author access", () => {
   it("returns a guest code once and stores only its salted hash", async () => {
     const values = input();
     const created = (await action(guest, "createPost", values)) as Created;
-    const access = (
-      await db.query<{ code_hash: string }>(
-        "SELECT code_hash FROM private.feedback_access WHERE feedback_id=$1",
-        [created.id],
-      )
-    )[0];
+    const access = await db.get("feedback_access", created.id);
     expect(created.code!.length).toBeGreaterThan(25);
-    expect(access.code_hash).not.toBe(created.code);
-    expect(passwordMatches(created.code!, access.code_hash)).toBe(true);
+    expect(access!.code_hash).not.toBe(created.code);
+    expect(passwordMatches(created.code!, String(access!.code_hash))).toBe(true);
     const duplicate = (await action(guest, "createPost", values)) as Created;
     expect(duplicate.id).toBe(created.id);
     expect(duplicate.code).toBeUndefined();
@@ -139,10 +119,10 @@ describe("anonymous feedback and author access", () => {
       action(user, "deletePost", { id: created.id }),
     ).rejects.toThrow("Ресми жауаптан кейін");
     expect((await detail(user, created.id)).post.canEdit).toBe(false);
-    const notices = await db.query(
-      "SELECT id FROM private.notifications WHERE profile_id=$1 AND feedback_id=$2",
-      [user.viewer!.id, created.id],
-    );
+    const notices = await db.find("notifications", {
+      profile_id: user.viewer!.id,
+      feedback_id: created.id,
+    });
     expect(notices).toHaveLength(1);
   });
   it("rotates recovery codes and invalidates previous grants", async () => {
@@ -209,9 +189,7 @@ describe("roles, state transitions and visibility", () => {
       active: false,
     });
     expect(
-      await db.query("SELECT 1 FROM private.sessions WHERE profile_id=$1", [
-        teacher.viewer!.id,
-      ]),
+      await db.find("sessions", { profile_id: teacher.viewer!.id }),
     ).toHaveLength(0);
     await action(leader, "setAccountActive", {
       id: teacher.viewer!.id,
@@ -330,11 +308,8 @@ describe("participation and files", () => {
       stars: 5,
       comment: "Өзгертілген пікір",
     });
-    const rows = await db.query<{ stars: number }>(
-      "SELECT stars FROM ratings WHERE profile_id=$1 AND teacher_id=$2",
-      [user.viewer!.id, demoId(200)],
-    );
-    expect(rows).toEqual([{ stars: 5 }]);
+    const rating = await db.get("ratings", `${user.viewer!.id}|${demoId(200)}`);
+    expect(rating).toMatchObject({ stars: 5 });
     await expect(
       action(user, "rateTeacher", { id: demoId(200), stars: 6 }),
     ).rejects.toThrow();
@@ -421,12 +396,17 @@ describe("participation and files", () => {
       false,
     );
   });
-  it("denies direct public SQL table access", async () => {
-    await engine.exec("CREATE ROLE public_test NOLOGIN; SET ROLE public_test;");
-    try {
-      await expect(engine.query("SELECT * FROM feedback")).rejects.toThrow();
-    } finally {
-      await engine.exec("RESET ROLE");
-    }
+  it("isolates store reads with defensive copies (replaces SQL RLS proof)", async () => {
+    // The memory repository must hand out copies: mutating a returned row can
+    // never corrupt stored state, which the RLS test previously guaranteed at
+    // the SQL layer.
+    const rows = await db.all("feedback");
+    rows.length = 0;
+    expect((await db.all("feedback")).length).toBeGreaterThan(0);
+    const post = await db.get("feedback", demoId(1000));
+    post!.title = "tampered";
+    expect(String((await db.get("feedback", demoId(1000)))!.title)).not.toBe(
+      "tampered",
+    );
   });
 });

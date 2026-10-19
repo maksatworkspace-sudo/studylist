@@ -17,7 +17,7 @@ import {
   token,
 } from "./security";
 import { detail } from "./queries";
-import type { Database } from "./db";
+import type { Store } from "./store/types";
 
 const id = z.uuid();
 const postInput = z.object({
@@ -33,31 +33,26 @@ const postInput = z.object({
   customTarget: z.string().trim().max(160).default(""),
   attachments: z.array(id).max(5).default([]),
 });
+const now = () => new Date().toISOString();
+const inHours = (hours: number) =>
+  new Date(Date.now() + hours * 3_600_000).toISOString();
 async function notify(
-  db: Database,
+  repo: Store,
   profile: string,
   post: string,
   title: string,
 ) {
-  await db.query(
-    "INSERT INTO private.notifications(id,profile_id,feedback_id,title) VALUES($1,$2,$3,$4)",
-    [randomUUID(), profile, post, title],
-  );
+  await repo.insert("notifications", {
+    id: randomUUID(),
+    profile_id: profile,
+    feedback_id: post,
+    title,
+    read_at: null,
+    created_at: now(),
+  });
 }
-async function lockPost(db: Database, id: string) {
-  const row = (
-    await db.query<{
-      id: string;
-      type: string;
-      status: string;
-      deleted: boolean;
-      hidden: boolean;
-      outcome: string | null;
-    }>(
-      "SELECT id,type,status,deleted,hidden,outcome FROM feedback WHERE id=$1 FOR UPDATE",
-      [id],
-    )
-  )[0];
+async function lockPost(repo: Store, id: string) {
+  const row = await repo.get("feedback", id);
   if (!row || row.deleted) throw new AppError("Жазба табылмады.", 404);
   return row;
 }
@@ -69,40 +64,29 @@ export async function action(ctx: Context, name: string, input: unknown) {
         "Атыңызды енгізіңіз немесе анонимді жариялауды таңдаңыз.",
       );
     const key = hash(`${ctx.sessionHash}:${data.requestId}`);
-    return ctx.db.transaction(async (db) => {
-      await db.query(
-        "INSERT INTO private.submissions(key) VALUES($1) ON CONFLICT DO NOTHING",
-        [key],
-      );
-      const previous = (
-        await db.query<{ feedback_id: string | null }>(
-          "SELECT feedback_id FROM private.submissions WHERE key=$1 FOR UPDATE",
-          [key],
-        )
-      )[0];
-      if (previous.feedback_id) {
-        const record = (
-          await db.query<{ number: number }>(
-            "SELECT number FROM feedback WHERE id=$1",
-            [previous.feedback_id],
-          )
-        )[0];
+    return ctx.store.transaction(async (repo) => {
+      const previous = await repo.get("submissions", key);
+      if (previous?.feedback_id) {
+        const record = await repo.get("feedback", String(previous.feedback_id));
         return {
           ok: true,
-          id: previous.feedback_id,
-          number: Number(record.number),
+          id: String(previous.feedback_id),
+          number: Number(record?.number),
           duplicate: true,
         };
       }
-      await rateLimit(db, `post:${ctx.ip}`, 12, 600);
-      const files = await db.query<{
-        id: string;
-        size: number;
-        ready: boolean;
-      }>(
-        "SELECT id,size,ready FROM private.attachments WHERE id=ANY($1::uuid[]) AND token_hash=$2 AND feedback_id IS NULL FOR UPDATE",
-        [data.attachments, ctx.sessionHash],
-      );
+      if (!previous) await repo.insert("submissions", { key, feedback_id: null });
+      await rateLimit(repo, `post:${ctx.ip}`, 12, 600);
+      const files = data.attachments.length
+        ? (
+            await repo.all("attachments")
+          ).filter(
+            (file) =>
+              data.attachments.includes(String(file.id)) &&
+              file.token_hash === ctx.sessionHash &&
+              file.feedback_id === null,
+          )
+        : [];
       if (
         files.length !== new Set(data.attachments).size ||
         files.some((f) => !f.ready) ||
@@ -119,61 +103,70 @@ export async function action(ctx: Context, name: string, input: unknown) {
           : data.type === "suggestion"
             ? "in_progress"
             : null;
-      const row = (
-        await db.query<{ number: number }>(
-          `INSERT INTO feedback(id,type,title,body,course_id,teacher_id,custom_target,anonymous,author_name,status)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING number`,
-          [
-            postId,
-            data.type,
-            data.title,
-            data.body,
-            data.courseId,
-            data.teacherId,
-            data.customTarget || null,
-            data.anonymous,
-            data.anonymous ? null : ctx.viewer?.name || data.authorName,
-            status,
-          ],
-        )
-      )[0];
-      await db.query(
-        "INSERT INTO private.feedback_access(feedback_id,profile_id,recovery_email,code_hash) VALUES($1,$2,$3,$4)",
-        [
-          postId,
-          ctx.viewer?.id || null,
-          ctx.viewer?.email || data.email || null,
-          code ? passwordHash(code) : null,
-        ],
-      );
+      const number = await repo.nextNumber();
+      await repo.insert("feedback", {
+        id: postId,
+        number,
+        type: data.type,
+        title: data.title,
+        body: data.body,
+        course_id: data.courseId,
+        teacher_id: data.teacherId,
+        custom_target: data.customTarget || null,
+        anonymous: data.anonymous,
+        author_name: data.anonymous
+          ? null
+          : ctx.viewer?.name || data.authorName,
+        status,
+        outcome: null,
+        confirmed: false,
+        hidden: false,
+        hidden_reason: null,
+        deleted: false,
+        resolved_at: null,
+        created_at: now(),
+        updated_at: now(),
+      });
+      await repo.insert("feedback_access", {
+        feedback_id: postId,
+        profile_id: ctx.viewer?.id || null,
+        recovery_email: ctx.viewer?.email || data.email || null,
+        code_hash: code ? passwordHash(code) : null,
+      });
       if (code)
-        await db.query(
-          "INSERT INTO private.guest_grants(token_hash,feedback_id,expires_at) VALUES($1,$2,now()+interval '12 hours')",
-          [ctx.sessionHash, postId],
-        );
+        await repo.insert("guest_grants", {
+          token_hash: ctx.sessionHash,
+          feedback_id: postId,
+          expires_at: inHours(12),
+        });
       if (status)
-        await db.query(
-          "INSERT INTO status_history(id,feedback_id,status) VALUES($1,$2,$3)",
-          [randomUUID(), postId, status],
-        );
-      if (files.length)
-        await db.query(
-          "UPDATE private.attachments SET feedback_id=$2 WHERE id=ANY($1::uuid[])",
-          [data.attachments, postId],
-        );
-      for (const manager of await db.query<{ id: string }>(
-        "SELECT id FROM profiles WHERE role IN ('admin','leadership') AND active",
-      ))
-        await notify(db, manager.id, postId, "Жаңа кері байланыс түсті");
-      await db.query(
-        "INSERT INTO private.jobs(id,kind,subject_id) VALUES($1,'moderation',$2)",
-        [randomUUID(), postId],
-      );
-      await db.query(
-        "UPDATE private.submissions SET feedback_id=$2 WHERE key=$1",
-        [key, postId],
-      );
-      return { ok: true, id: postId, number: Number(row.number), code };
+        await repo.insert("status_history", {
+          id: randomUUID(),
+          feedback_id: postId,
+          status,
+          outcome: null,
+          created_at: now(),
+        });
+      for (const file of files)
+        await repo.update("attachments", String(file.id), {
+          feedback_id: postId,
+        });
+      for (const manager of await repo.all("profiles"))
+        if (["admin", "leadership"].includes(String(manager.role)) && manager.active)
+          await notify(repo, String(manager.id), postId, "Жаңа кері байланыс түсті");
+      await repo.insert("jobs", {
+        id: randomUUID(),
+        kind: "moderation",
+        subject_id: postId,
+        payload: "{}",
+        status: "pending",
+        attempts: 0,
+        available_at: now(),
+        last_error: null,
+        created_at: now(),
+      });
+      await repo.update("submissions", key, { feedback_id: postId });
+      return { ok: true, id: postId, number, code };
     });
   }
   if (name === "unlockPost") {
@@ -183,52 +176,67 @@ export async function action(ctx: Context, name: string, input: unknown) {
         code: z.string().min(1).max(200),
       })
       .parse(input);
-    await rateLimit(ctx.db, `code:${ctx.ip}:${data.number}`, 5, 600);
-    const row = (
-      await ctx.db.query<{ id: string; code_hash: string }>(
-        "SELECT f.id,a.code_hash FROM feedback f JOIN private.feedback_access a ON a.feedback_id=f.id WHERE f.number=$1 AND NOT f.deleted",
-        [data.number],
-      )
-    )[0];
-    if (!row?.code_hash || !passwordMatches(data.code, row.code_hash))
+    await rateLimit(ctx.store, `code:${ctx.ip}:${data.number}`, 5, 600);
+    const post = (
+      await ctx.store.find("feedback", { number: data.number })
+    ).find((f) => !f.deleted);
+    const access = post
+      ? await ctx.store.get("feedback_access", String(post.id))
+      : undefined;
+    if (!post || !access?.code_hash || !passwordMatches(data.code, String(access.code_hash)))
       throw new AppError("Өтініш нөмірі немесе құпия код қате.", 401);
-    await ctx.db.query(
-      "INSERT INTO private.guest_grants(token_hash,feedback_id,expires_at) VALUES($1,$2,now()+interval '12 hours') ON CONFLICT(token_hash,feedback_id) DO UPDATE SET expires_at=excluded.expires_at",
-      [ctx.sessionHash, row.id],
-    );
-    return { ok: true, id: row.id };
+    const grantKey = `${ctx.sessionHash}|${post.id}`;
+    const existing = await ctx.store.get("guest_grants", grantKey);
+    if (existing)
+      await ctx.store.update("guest_grants", grantKey, { expires_at: inHours(12) });
+    else
+      await ctx.store.insert("guest_grants", {
+        token_hash: ctx.sessionHash,
+        feedback_id: String(post.id),
+        expires_at: inHours(12),
+      });
+    return { ok: true, id: String(post.id) };
   }
   if (name === "recoverPost") {
     const data = z.object({ email: z.email() }).parse(input);
-    await rateLimit(ctx.db, `recover:${hash(data.email)}`, 3, 600);
-    const records = await ctx.db.query<{ id: string }>(
-      "SELECT a.feedback_id AS id FROM private.feedback_access a JOIN feedback f ON f.id=a.feedback_id WHERE lower(a.recovery_email)=lower($1) AND a.profile_id IS NULL AND NOT f.deleted",
-      [data.email],
+    await rateLimit(ctx.store, `recover:${hash(data.email)}`, 3, 600);
+    const access = await ctx.store.all("feedback_access");
+    const feedback = await ctx.store.all("feedback");
+    const records = access.filter(
+      (a) =>
+        a.profile_id === null &&
+        String(a.recovery_email ?? "").toLowerCase() === data.email &&
+        !feedback.find((f) => f.id === a.feedback_id)?.deleted,
     );
     let localToken: string | undefined;
     for (const record of records) {
       const proof = token();
       localToken = proof;
-      await ctx.db.transaction(async (db) => {
-        await db.query(
-          "INSERT INTO private.tokens(token_hash,purpose,subject_id,expires_at) VALUES($1,'guest',$2,now()+interval '30 minutes')",
-          [hash(proof), record.id],
-        );
+      await ctx.store.transaction(async (repo) => {
+        await repo.insert("tokens", {
+          token_hash: hash(proof),
+          purpose: "guest",
+          subject_id: record.feedback_id,
+          expires_at: inHours(0.5),
+        });
         if (!ctx.demo)
-          await db.query(
-            "INSERT INTO private.jobs(id,kind,subject_id,payload) VALUES($1,'email',$2,$3)",
-            [
-              randomUUID(),
-              record.id,
-              await encrypt(
-                JSON.stringify({
-                  to: data.email,
-                  subject: "Өтінішке қолжетімділікті қалпына келтіру",
-                  text: `${process.env.APP_URL}/#guestRecovery=${encodeURIComponent(proof)}`,
-                }),
-              ),
-            ],
-          );
+          await repo.insert("jobs", {
+            id: randomUUID(),
+            kind: "email",
+            subject_id: record.feedback_id,
+            payload: await encrypt(
+              JSON.stringify({
+                to: data.email,
+                subject: "Өтінішке қолжетімділікті қалпына келтіру",
+                text: `${process.env.APP_URL}/#guestRecovery=${encodeURIComponent(proof)}`,
+              }),
+            ),
+            status: "pending",
+            attempts: 0,
+            available_at: now(),
+            last_error: null,
+            created_at: now(),
+          });
       });
     }
     return {
@@ -241,37 +249,33 @@ export async function action(ctx: Context, name: string, input: unknown) {
   if (name === "resetGuestCode") {
     const data = z.object({ token: z.string().min(10).max(200) }).parse(input);
     const code = token();
-    const result = await ctx.db.transaction(async (db) => {
-      const record = (
-        await db.query<{ subject_id: string }>(
-          "DELETE FROM private.tokens WHERE token_hash=$1 AND purpose='guest' AND expires_at>now() RETURNING subject_id",
-          [hash(data.token)],
-        )
-      )[0];
-      if (!record) throw new AppError("Қалпына келтіру сілтемесі жарамсыз.");
-      await db.query(
-        "DELETE FROM private.tokens WHERE purpose='guest' AND subject_id=$1",
-        [record.subject_id],
-      );
-      await db.query(
-        "UPDATE private.feedback_access SET code_hash=$2 WHERE feedback_id=$1",
-        [record.subject_id, passwordHash(code)],
-      );
-      await db.query("DELETE FROM private.guest_grants WHERE feedback_id=$1", [
-        record.subject_id,
-      ]);
-      await db.query(
-        "INSERT INTO private.guest_grants(token_hash,feedback_id,expires_at) VALUES($1,$2,now()+interval '12 hours')",
-        [ctx.sessionHash, record.subject_id],
-      );
-      const post = (
-        await db.query<{ number: number }>(
-          "SELECT number FROM feedback WHERE id=$1 AND NOT deleted",
-          [record.subject_id],
-        )
-      )[0];
-      if (!post) throw new AppError("Өтініш қолжетімсіз.", 404);
-      return { id: record.subject_id, number: Number(post.number) };
+    const result = await ctx.store.transaction(async (repo) => {
+      const record = await repo.get("tokens", hash(data.token));
+      if (
+        !record ||
+        record.purpose !== "guest" ||
+        Date.parse(String(record.expires_at)) <= Date.now()
+      )
+        throw new AppError("Қалпына келтіру сілтемесі жарамсыз.");
+      const subjectId = String(record.subject_id);
+      await repo.delete("tokens", hash(data.token));
+      for (const other of await repo.find("tokens", {
+        purpose: "guest",
+        subject_id: subjectId,
+      }))
+        await repo.delete("tokens", String(other.token_hash));
+      await repo.update("feedback_access", subjectId, {
+        code_hash: passwordHash(code),
+      });
+      await repo.deleteWhere("guest_grants", { feedback_id: subjectId });
+      await repo.insert("guest_grants", {
+        token_hash: ctx.sessionHash,
+        feedback_id: subjectId,
+        expires_at: inHours(12),
+      });
+      const post = await repo.get("feedback", subjectId);
+      if (!post || post.deleted) throw new AppError("Өтініш қолжетімсіз.", 404);
+      return { id: subjectId, number: Number(post.number) };
     });
     return { ok: true, ...result, code };
   }
@@ -280,19 +284,18 @@ export async function action(ctx: Context, name: string, input: unknown) {
     const data = z.object({ id }).parse(input);
     await detail(ctx, data.id);
     const table = name === "toggleSupport" ? "supports" : "bookmarks";
-    await ctx.db.transaction(async (db) => {
-      const post = await lockPost(db, data.id);
+    const key = `${viewer.id}|${data.id}`;
+    await ctx.store.transaction(async (repo) => {
+      const post = await lockPost(repo, data.id);
       if (post.hidden)
         throw new AppError("Жасырылған жазбаға бұл әрекет қолжетімсіз.", 403);
-      const existing = await db.query(
-        `DELETE FROM ${table} WHERE profile_id=$1 AND feedback_id=$2 RETURNING profile_id`,
-        [viewer.id, data.id],
-      );
-      if (!existing.length)
-        await db.query(
-          `INSERT INTO ${table}(profile_id,feedback_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,
-          [viewer.id, data.id],
-        );
+      const existing = await repo.get(table, key);
+      if (existing) await repo.delete(table, key);
+      else
+        await repo.insert(table, {
+          profile_id: viewer.id,
+          feedback_id: data.id,
+        });
     });
     return { ok: true };
   }
@@ -304,18 +307,14 @@ export async function action(ctx: Context, name: string, input: unknown) {
         body: z.string().trim().min(10).max(10000).optional(),
       })
       .parse(input);
-    await ctx.db.transaction(async (db) => {
-      await lockPost(db, data.id);
-      if (!(await owns(ctx, data.id, db)))
+    await ctx.store.transaction(async (repo) => {
+      await lockPost(repo, data.id);
+      if (!(await owns(ctx, data.id, repo)))
         throw new AppError("Бұл жазбаға авторлық құқығыңыз жоқ.", 403);
-      if (
-        (
-          await db.query(
-            "SELECT id FROM official_replies WHERE feedback_id=$1",
-            [data.id],
-          )
-        ).length
-      )
+      const replies = await repo.find("official_replies", {
+        feedback_id: data.id,
+      });
+      if (replies.length)
         throw new AppError(
           "Ресми жауаптан кейін жазбаны өзгертуге немесе өшіруге болмайды.",
           409,
@@ -323,15 +322,23 @@ export async function action(ctx: Context, name: string, input: unknown) {
       if (name === "editPost") {
         if (!data.title || !data.body)
           throw new AppError("Тақырып пен мәтінді толтырыңыз.");
-        await db.query(
-          "UPDATE feedback SET title=$2,body=$3,updated_at=now() WHERE id=$1",
-          [data.id, data.title, data.body],
-        );
-        await db.query(
-          "INSERT INTO private.jobs(id,kind,subject_id) VALUES($1,'moderation',$2)",
-          [randomUUID(), data.id],
-        );
-      } else await deletePost(db, data.id);
+        await repo.update("feedback", data.id, {
+          title: data.title,
+          body: data.body,
+          updated_at: now(),
+        });
+        await repo.insert("jobs", {
+          id: randomUUID(),
+          kind: "moderation",
+          subject_id: data.id,
+          payload: "{}",
+          status: "pending",
+          attempts: 0,
+          available_at: now(),
+          last_error: null,
+          created_at: now(),
+        });
+      } else await deletePost(repo, data.id);
     });
     return { ok: true };
   }
@@ -345,30 +352,43 @@ export async function action(ctx: Context, name: string, input: unknown) {
       })
       .parse(input);
     await detail(ctx, data.id);
-    await rateLimit(ctx.db, `comment:${viewer.id}`, 30, 60);
-    await ctx.db.transaction(async (db) => {
-      const post = await lockPost(db, data.id);
+    await rateLimit(ctx.store, `comment:${viewer.id}`, 30, 60);
+    await ctx.store.transaction(async (repo) => {
+      const post = await lockPost(repo, data.id);
       if (post.hidden)
         throw new AppError("Жасырылған жазбаға пікір қосылмайды.", 403);
-      if (
-        data.parentId &&
-        !(
-          await db.query(
-            "SELECT id FROM comments WHERE id=$1 AND feedback_id=$2 AND parent_id IS NULL AND NOT deleted",
-            [data.parentId, data.id],
-          )
-        ).length
-      )
-        throw new AppError("Бір деңгейдегі пікірге ғана жауап беруге болады.");
+      if (data.parentId) {
+        const parent = await repo.get("comments", data.parentId);
+        if (
+          !parent ||
+          parent.feedback_id !== data.id ||
+          parent.parent_id !== null ||
+          parent.deleted
+        )
+          throw new AppError("Бір деңгейдегі пікірге ғана жауап беруге болады.");
+      }
       const commentId = randomUUID();
-      await db.query(
-        "INSERT INTO comments(id,feedback_id,profile_id,parent_id,body) VALUES($1,$2,$3,$4,$5)",
-        [commentId, data.id, viewer.id, data.parentId, data.body],
-      );
-      await db.query(
-        "INSERT INTO private.jobs(id,kind,subject_id,payload) VALUES($1,'moderation',$2,$3)",
-        [randomUUID(), data.id, JSON.stringify({ commentId })],
-      );
+      await repo.insert("comments", {
+        id: commentId,
+        feedback_id: data.id,
+        profile_id: viewer.id,
+        parent_id: data.parentId,
+        body: data.body,
+        deleted: false,
+        created_at: now(),
+        updated_at: now(),
+      });
+      await repo.insert("jobs", {
+        id: randomUUID(),
+        kind: "moderation",
+        subject_id: data.id,
+        payload: JSON.stringify({ commentId }),
+        status: "pending",
+        attempts: 0,
+        available_at: now(),
+        last_error: null,
+        created_at: now(),
+      });
     });
     return { ok: true };
   }
@@ -377,29 +397,33 @@ export async function action(ctx: Context, name: string, input: unknown) {
     const data = z
       .object({ id, body: z.string().trim().min(1).max(5000).optional() })
       .parse(input);
-    const row = (
-      await ctx.db.query<{ feedback_id: string }>(
-        "SELECT feedback_id FROM comments WHERE id=$1 AND profile_id=$2 AND NOT deleted",
-        [data.id, viewer.id],
-      )
-    )[0];
-    if (!row) throw new AppError("Пікірге құқығыңыз жоқ.", 403);
-    await detail(ctx, row.feedback_id);
+    const row = await ctx.store.get("comments", data.id);
+    if (!row || row.profile_id !== viewer.id || row.deleted)
+      throw new AppError("Пікірге құқығыңыз жоқ.", 403);
+    await detail(ctx, String(row.feedback_id));
     if (name === "editComment") {
       if (!data.body) throw new AppError("Пікір мәтінін енгізіңіз.");
-      await ctx.db.query(
-        "UPDATE comments SET body=$2,updated_at=now() WHERE id=$1",
-        [data.id, data.body],
-      );
+      await ctx.store.update("comments", data.id, {
+        body: data.body,
+        updated_at: now(),
+      });
     } else
-      await ctx.db.query(
-        "UPDATE comments SET deleted=true,body='',updated_at=now() WHERE id=$1",
-        [data.id],
-      );
-    await ctx.db.query(
-      "INSERT INTO private.jobs(id,kind,subject_id,payload) VALUES($1,'moderation',$2,$3)",
-      [randomUUID(), row.feedback_id, JSON.stringify({ commentId: data.id })],
-    );
+      await ctx.store.update("comments", data.id, {
+        deleted: true,
+        body: "",
+        updated_at: now(),
+      });
+    await ctx.store.insert("jobs", {
+      id: randomUUID(),
+      kind: "moderation",
+      subject_id: row.feedback_id,
+      payload: JSON.stringify({ commentId: data.id }),
+      status: "pending",
+      attempts: 0,
+      available_at: now(),
+      last_error: null,
+      created_at: now(),
+    });
     return { ok: true };
   }
   if (name === "rateTeacher") {
@@ -411,18 +435,25 @@ export async function action(ctx: Context, name: string, input: unknown) {
         comment: z.string().trim().max(3000).default(""),
       })
       .parse(input);
-    if (
-      !(
-        await ctx.db.query("SELECT id FROM teachers WHERE id=$1 AND active", [
-          data.id,
-        ])
-      ).length
-    )
+    const teacher = await ctx.store.get("teachers", data.id);
+    if (!teacher || !teacher.active)
       throw new AppError("Оқытушы табылмады.", 404);
-    await ctx.db.query(
-      "INSERT INTO ratings(profile_id,teacher_id,stars,comment) VALUES($1,$2,$3,$4) ON CONFLICT(profile_id,teacher_id) DO UPDATE SET stars=excluded.stars,comment=excluded.comment,updated_at=now()",
-      [viewer.id, data.id, data.stars, data.comment],
-    );
+    const key = `${viewer.id}|${data.id}`;
+    const existing = await ctx.store.get("ratings", key);
+    if (existing)
+      await ctx.store.update("ratings", key, {
+        stars: data.stars,
+        comment: data.comment,
+        updated_at: now(),
+      });
+    else
+      await ctx.store.insert("ratings", {
+        profile_id: viewer.id,
+        teacher_id: data.id,
+        stars: data.stars,
+        comment: data.comment,
+        updated_at: now(),
+      });
     return { ok: true };
   }
   if (name === "officialReply") {
@@ -430,43 +461,41 @@ export async function action(ctx: Context, name: string, input: unknown) {
     const data = z
       .object({ id, body: z.string().trim().min(3).max(10000) })
       .parse(input);
-    await ctx.db.transaction(async (db) => {
-      await lockPost(db, data.id);
-      await db.query(
-        "INSERT INTO official_replies(id,feedback_id,profile_id,body) VALUES($1,$2,$3,$4)",
-        [randomUUID(), data.id, viewer.id, data.body],
-      );
-      const author = (
-        await db.query<{
-          profile_id: string | null;
-          recovery_email: string | null;
-        }>(
-          "SELECT profile_id,recovery_email FROM private.feedback_access WHERE feedback_id=$1",
-          [data.id],
-        )
-      )[0];
+    await ctx.store.transaction(async (repo) => {
+      await lockPost(repo, data.id);
+      await repo.insert("official_replies", {
+        id: randomUUID(),
+        feedback_id: data.id,
+        profile_id: viewer.id,
+        body: data.body,
+        created_at: now(),
+      });
+      const author = await repo.get("feedback_access", data.id);
       if (author?.profile_id)
         await notify(
-          db,
-          author.profile_id,
+          repo,
+          String(author.profile_id),
           data.id,
           "Өтінішіңізге ресми жауап берілді",
         );
       if (author?.recovery_email)
-        await db.query(
-          "INSERT INTO private.jobs(id,kind,subject_id,payload) VALUES($1,'email',$2,$3)",
-          [
-            randomUUID(),
-            data.id,
-            await encrypt(
-              JSON.stringify({
-                to: author.recovery_email,
-                subject: "MAXBALL EDTECH: өтінішіңізге жауап берілді",
-                text: `Өтінішіңізге ресми жауап берілді. ${process.env.APP_URL || "http://localhost:3000"}/?post=${data.id}`,
-              }),
-            ),
-          ],
-        );
+        await repo.insert("jobs", {
+          id: randomUUID(),
+          kind: "email",
+          subject_id: data.id,
+          payload: await encrypt(
+            JSON.stringify({
+              to: String(author.recovery_email),
+              subject: "MAXBALL EDTECH: өтінішіңізге жауап берілді",
+              text: `Өтінішіңізге ресми жауап берілді. ${process.env.APP_URL || "http://localhost:3000"}/?post=${data.id}`,
+            }),
+          ),
+          status: "pending",
+          attempts: 0,
+          available_at: now(),
+          last_error: null,
+          created_at: now(),
+        });
     });
     return { ok: true };
   }
@@ -481,10 +510,10 @@ export async function action(ctx: Context, name: string, input: unknown) {
         resolved: z.boolean().optional(),
       })
       .parse(input);
-    await ctx.db.transaction(async (db) => {
-      const post = await lockPost(db, data.id);
+    await ctx.store.transaction(async (repo) => {
+      const post = await lockPost(repo, data.id);
       if (name === "resolution") {
-        if (!(await owns(ctx, data.id, db)))
+        if (!(await owns(ctx, data.id, repo)))
           throw new AppError("Авторлық қолжетімділік қажет.", 403);
         if (
           post.type !== "issue" ||
@@ -493,9 +522,7 @@ export async function action(ctx: Context, name: string, input: unknown) {
         )
           throw new AppError("Бұл әрекет шешілген мәселеге ғана қолданылады.");
         if (data.resolved) {
-          await db.query("UPDATE feedback SET confirmed=true WHERE id=$1", [
-            data.id,
-          ]);
+          await repo.update("feedback", data.id, { confirmed: true });
           return;
         }
         data.status = "reviewing";
@@ -519,14 +546,21 @@ export async function action(ctx: Context, name: string, input: unknown) {
       if (data.status === "reviewed" && !outcome)
         throw new AppError("Ұсыныстың нәтижесін көрсетіңіз.");
       if (post.status === data.status && post.outcome === outcome) return;
-      await db.query(
-        "UPDATE feedback SET status=$2,outcome=$3,confirmed=false,resolved_at=CASE WHEN $2='resolved' THEN now() ELSE NULL END,updated_at=now() WHERE id=$1",
-        [data.id, data.status, outcome],
-      );
-      await db.query(
-        "INSERT INTO status_history(id,feedback_id,status,outcome) VALUES($1,$2,$3,$4)",
-        [randomUUID(), data.id, data.status, outcome],
-      );
+      await repo.update("feedback", data.id, {
+        status: data.status ?? null,
+        outcome,
+        confirmed: false,
+        resolved_at:
+          data.status === "resolved" ? now() : null,
+        updated_at: now(),
+      });
+      await repo.insert("status_history", {
+        id: randomUUID(),
+        feedback_id: data.id,
+        status: data.status!,
+        outcome,
+        created_at: now(),
+      });
     });
     return { ok: true };
   }
@@ -541,28 +575,31 @@ export async function action(ctx: Context, name: string, input: unknown) {
       .parse(input);
     if (data.mode === "hide" && data.reason.length < 3)
       throw new AppError("Жасыру себебін жазыңыз.");
-    await ctx.db.transaction(async (db) => {
-      await lockPost(db, data.id);
-      if (data.mode === "delete") await deletePost(db, data.id);
+    await ctx.store.transaction(async (repo) => {
+      await lockPost(repo, data.id);
+      if (data.mode === "delete") await deletePost(repo, data.id);
       else
-        await db.query(
-          "UPDATE feedback SET hidden=$2,hidden_reason=$3,updated_at=now() WHERE id=$1",
-          [
-            data.id,
-            data.mode === "hide",
-            data.mode === "hide" ? data.reason : null,
-          ],
-        );
+        await repo.update("feedback", data.id, {
+          hidden: data.mode === "hide",
+          hidden_reason: data.mode === "hide" ? data.reason : null,
+          updated_at: now(),
+        });
     });
     return { ok: true };
   }
   if (name === "readNotifications") {
     const viewer = requireUser(ctx);
     const data = z.object({ id: id.optional() }).parse(input);
-    await ctx.db.query(
-      "UPDATE private.notifications SET read_at=now() WHERE profile_id=$1 AND read_at IS NULL AND ($2::uuid IS NULL OR id=$2)",
-      [viewer.id, data.id || null],
-    );
+    for (const notice of await ctx.store.find("notifications", {
+      profile_id: viewer.id,
+    }))
+      if (
+        (notice.read_at === null || notice.read_at === undefined) &&
+        (!data.id || notice.id === data.id)
+      )
+        await ctx.store.update("notifications", String(notice.id), {
+          read_at: now(),
+        });
     return { ok: true };
   }
   if (name === "addCourse" || name === "addTeacher") {
@@ -574,15 +611,20 @@ export async function action(ctx: Context, name: string, input: unknown) {
       })
       .parse(input);
     if (name === "addCourse")
-      await ctx.db.query("INSERT INTO courses(id,name) VALUES($1,$2)", [
-        randomUUID(),
-        data.name,
-      ]);
+      await ctx.store.insert("courses", {
+        id: randomUUID(),
+        name: data.name,
+        active: true,
+      });
     else
-      await ctx.db.query(
-        "INSERT INTO teachers(id,name,subject) VALUES($1,$2,$3)",
-        [randomUUID(), data.name, data.subject],
-      );
+      await ctx.store.insert("teachers", {
+        id: randomUUID(),
+        profile_id: null,
+        name: data.name,
+        subject: data.subject,
+        color: "blue",
+        active: true,
+      });
     return { ok: true };
   }
   if (name === "setRole") {
@@ -592,27 +634,32 @@ export async function action(ctx: Context, name: string, input: unknown) {
       .parse(input);
     if (data.id === viewer.id)
       throw new AppError("Өз басқару құқығыңызды осы беттен өзгерте алмайсыз.");
-    await ctx.db.transaction(async (db) => {
-      const person = (
-        await db.query<{ name: string; role: string; active: boolean }>(
-          "SELECT name,role,active FROM profiles WHERE id=$1 FOR UPDATE",
-          [data.id],
-        )
-      )[0];
+    await ctx.store.transaction(async (repo) => {
+      const person = await repo.get("profiles", data.id);
       if (!person) throw new AppError("Аккаунт табылмады.", 404);
-      await db.query("UPDATE profiles SET role=$2 WHERE id=$1", [
-        data.id,
-        data.role,
-      ]);
-      if (data.role === "teacher")
-        await db.query(
-          "INSERT INTO teachers(id,profile_id,name,subject,active) VALUES($1,$2,$3,'Жалпы курс',$4) ON CONFLICT(profile_id) DO UPDATE SET active=excluded.active",
-          [randomUUID(), data.id, person.name, person.active],
-        );
-      else if (person.role === "teacher")
-        await db.query("UPDATE teachers SET active=false WHERE profile_id=$1", [
-          data.id,
-        ]);
+      await repo.update("profiles", data.id, { role: data.role });
+      if (data.role === "teacher") {
+        const existing = (
+          await repo.all("teachers")
+        ).find((t) => t.profile_id === data.id);
+        if (existing)
+          await repo.update("teachers", String(existing.id), {
+            active: Boolean(person.active),
+          });
+        else
+          await repo.insert("teachers", {
+            id: randomUUID(),
+            profile_id: data.id,
+            name: String(person.name),
+            subject: "Жалпы курс",
+            color: "blue",
+            active: Boolean(person.active),
+          });
+      } else if (person.role === "teacher")
+        for (const teacher of await repo.find("teachers", {
+          profile_id: data.id,
+        }))
+          await repo.update("teachers", String(teacher.id), { active: false });
     });
     return { ok: true };
   }
@@ -627,26 +674,26 @@ export async function action(ctx: Context, name: string, input: unknown) {
         active: z.boolean(),
       })
       .parse(input);
-    if (data.kind === "course")
-      await ctx.db.query("UPDATE courses SET name=$2,active=$3 WHERE id=$1", [
-        data.id,
-        data.name,
-        data.active,
-      ]);
-    else
-      await ctx.db.transaction(async (db) => {
-        const record = (
-          await db.query<{ profile_id: string | null }>(
-            "UPDATE teachers SET name=$2,subject=$3,active=$4 WHERE id=$1 RETURNING profile_id",
-            [data.id, data.name, data.subject, data.active],
-          )
-        )[0];
-        if (record?.profile_id)
-          await db.query("UPDATE profiles SET name=$2 WHERE id=$1", [
-            record.profile_id,
-            data.name,
-          ]);
+    if (data.kind === "course") {
+      const course = await ctx.store.get("courses", data.id);
+      if (!course) throw new AppError("Жазба табылмады.", 404);
+      await ctx.store.update("courses", data.id, {
+        name: data.name,
+        active: data.active,
       });
+    } else {
+      const record = await ctx.store.get("teachers", data.id);
+      if (!record) throw new AppError("Жазба табылмады.", 404);
+      await ctx.store.update("teachers", data.id, {
+        name: data.name,
+        subject: data.subject,
+        active: data.active,
+      });
+      if (record.profile_id)
+        await ctx.store.update("profiles", String(record.profile_id), {
+          name: data.name,
+        });
+    }
     return { ok: true };
   }
   if (name === "setAccountActive") {
@@ -654,33 +701,36 @@ export async function action(ctx: Context, name: string, input: unknown) {
     const data = z.object({ id, active: z.boolean() }).parse(input);
     if (data.id === viewer.id)
       throw new AppError("Өз аккаунтыңызды бұғаттай алмайсыз.");
-    await ctx.db.transaction(async (db) => {
-      await db.query("UPDATE profiles SET active=$2 WHERE id=$1", [
-        data.id,
-        data.active,
-      ]);
+    await ctx.store.transaction(async (repo) => {
+      const person = await repo.get("profiles", data.id);
+      if (!person) throw new AppError("Аккаунт табылмады.", 404);
+      await repo.update("profiles", data.id, { active: data.active });
       if (!data.active)
-        await db.query("DELETE FROM private.sessions WHERE profile_id=$1", [
-          data.id,
-        ]);
-      await db.query(
-        "UPDATE teachers SET active=$2 AND EXISTS(SELECT 1 FROM profiles WHERE id=$1 AND role='teacher') WHERE profile_id=$1",
-        [data.id, data.active],
-      );
+        await repo.deleteWhere("sessions", { profile_id: data.id });
+      if (person.role === "teacher")
+        for (const teacher of await repo.find("teachers", {
+          profile_id: data.id,
+        }))
+          await repo.update("teachers", String(teacher.id), {
+            active: data.active,
+          });
     });
     return { ok: true };
   }
   throw new AppError("Белгісіз әрекет.", 404);
 }
-async function deletePost(db: Database, id: string) {
-  const files = await db.query<{ object_path: string }>(
-    "SELECT object_path FROM private.attachments WHERE feedback_id=$1",
-    [id],
-  );
-  for (const file of files)
-    await db.query(
-      "INSERT INTO private.jobs(id,kind,payload) VALUES($1,'deleteFile',$2)",
-      [randomUUID(), JSON.stringify({ path: file.object_path })],
-    );
-  await db.query("DELETE FROM feedback WHERE id=$1", [id]);
+async function deletePost(repo: Store, id: string) {
+  for (const file of await repo.find("attachments", { feedback_id: id }))
+    await repo.insert("jobs", {
+      id: randomUUID(),
+      kind: "deleteFile",
+      subject_id: null,
+      payload: JSON.stringify({ path: file.object_path }),
+      status: "pending",
+      attempts: 0,
+      available_at: now(),
+      last_error: null,
+      created_at: now(),
+    });
+  await repo.delete("feedback", id);
 }

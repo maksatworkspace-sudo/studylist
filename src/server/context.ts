@@ -1,11 +1,13 @@
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
-import { database, localMode, type Database } from "./db";
+import { store } from "./storage";
+import { localMode } from "./mode";
+import type { Store } from "./store/types";
 import { AppError, decrypt, encrypt, hash, token } from "./security";
 import type { Viewer } from "@/lib/types";
 
 export type Context = {
-  db: Database;
+  store: Store;
   viewer: Viewer | null;
   sessionHash: string;
   newToken?: string;
@@ -29,71 +31,69 @@ export const supabaseAdmin = () => {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY,
-    { auth: { persistSession: false, autoRefreshToken: false } },
+    { auth: { persistSession: false, autoRefreshToken: true } },
   );
 };
+function toViewer(row: Record<string, unknown> | undefined): Viewer | null {
+  if (!row || !row.active) return null;
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    email: String(row.email),
+    phone: String(row.phone),
+    role: row.role as Viewer["role"],
+    verified: Boolean(row.verified),
+  };
+}
 export async function context(request: Request): Promise<Context> {
-  const db = await database();
+  const repo = await store();
   const jar = await cookies();
   const raw = jar.get("maxball_session")?.value;
   const ip =
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
   const ctx: Context = {
-    db,
+    store: repo,
     viewer: null,
     sessionHash: raw ? hash(raw) : "",
     ip,
     demo: localMode(),
   };
-  let session = raw
-    ? (
-        await db.query<{
-          profile_id: string | null;
-          provider_session: string | null;
-        }>(
-          "SELECT profile_id,provider_session FROM private.sessions WHERE token_hash=$1 AND expires_at>now()",
-          [ctx.sessionHash],
-        )
-      )[0]
-    : null;
-  if (!session) {
-    await rotateSession(ctx, null);
-    session = null;
-  }
-  if (session?.profile_id) {
-    let valid = ctx.demo;
-    if (!valid && session.provider_session) {
-      const stored = JSON.parse(await decrypt(session.provider_session));
-      const auth = supabase();
-      let result = await auth.auth.getUser(stored.access_token);
-      if (result.error) {
-        const refreshed = await auth.auth.refreshSession({
-          refresh_token: stored.refresh_token,
-        });
-        if (refreshed.data.session) {
-          result = await auth.auth.getUser(refreshed.data.session.access_token);
-          await db.query(
-            "UPDATE private.sessions SET provider_session=$2 WHERE token_hash=$1",
-            [
-              ctx.sessionHash,
-              await encrypt(JSON.stringify(refreshed.data.session)),
-            ],
-          );
+  if (raw) {
+    const session = await repo.get("sessions", ctx.sessionHash);
+    const valid =
+      session && Date.parse(String(session.expires_at)) > Date.now();
+    if (!valid) {
+      await rotateSession(ctx, null);
+    } else if (session.profile_id) {
+      let accepted = ctx.demo;
+      if (!accepted && session.provider_session) {
+        const stored = JSON.parse(await decrypt(String(session.provider_session)));
+        const auth = supabase();
+        let result = await auth.auth.getUser(stored.access_token);
+        if (result.error) {
+          const refreshed = await auth.auth.refreshSession({
+            refresh_token: stored.refresh_token,
+          });
+          if (refreshed.data.session) {
+            result = await auth.auth.getUser(refreshed.data.session.access_token);
+            await repo.update("sessions", ctx.sessionHash, {
+              provider_session: await encrypt(JSON.stringify(refreshed.data.session)),
+            });
+          }
         }
+        accepted =
+          !result.error &&
+          result.data.user?.id === session.profile_id &&
+          Boolean(result.data.user?.email_confirmed_at);
       }
-      valid =
-        !result.error &&
-        result.data.user?.id === session.profile_id &&
-        Boolean(result.data.user?.email_confirmed_at);
+      if (accepted)
+        ctx.viewer = toViewer(
+          await repo.get("profiles", String(session.profile_id)),
+        );
     }
-    if (valid)
-      ctx.viewer =
-        (
-          await db.query<Viewer>(
-            "SELECT id,name,email,phone,role,verified FROM profiles WHERE id=$1 AND active=true",
-            [session.profile_id],
-          )
-        )[0] || null;
+  } else {
+    // First visit: issue a session so uploads/grants have an owner token.
+    await rotateSession(ctx, null);
   }
   return ctx;
 }
@@ -105,39 +105,36 @@ export async function rotateSession(
   const raw = token();
   const nextHash = hash(raw);
   const oldHash = ctx.sessionHash;
-  await ctx.db.transaction(async (db) => {
-    await db.query(
-      "INSERT INTO private.sessions(token_hash,profile_id,expires_at,provider_session) VALUES($1,$2,now()+interval '14 days',$3)",
-      [
-        nextHash,
-        profileId,
-        providerSession ? await encrypt(JSON.stringify(providerSession)) : null,
-      ],
-    );
+  const repo = ctx.store;
+  await repo.transaction(async (tx) => {
+    await tx.insert("sessions", {
+      token_hash: nextHash,
+      profile_id: profileId,
+      expires_at: new Date(Date.now() + 14 * 86400_000).toISOString(),
+      provider_session: providerSession
+        ? await encrypt(JSON.stringify(providerSession))
+        : null,
+    });
     if (oldHash) {
-      await db.query(
-        "INSERT INTO private.guest_grants(token_hash,feedback_id,expires_at) SELECT $1,feedback_id,expires_at FROM private.guest_grants WHERE token_hash=$2 AND expires_at>now() ON CONFLICT DO NOTHING",
-        [nextHash, oldHash],
-      );
-      // Staged files belong to the browser session and survive a login.
-      await db.query(
-        "UPDATE private.attachments SET token_hash=$1 WHERE token_hash=$2",
-        [nextHash, oldHash],
-      );
-      await db.query("DELETE FROM private.sessions WHERE token_hash=$1", [
-        oldHash,
-      ]);
+      // Guest grants survive a login; staged uploads follow the session.
+      for (const grant of await tx.find("guest_grants", {
+        token_hash: oldHash,
+      }))
+        if (Date.parse(String(grant.expires_at)) > Date.now())
+          await tx.insert("guest_grants", {
+            token_hash: nextHash,
+            feedback_id: grant.feedback_id,
+            expires_at: grant.expires_at,
+          }).catch(() => {});
+      for (const file of await tx.find("attachments", { token_hash: oldHash }))
+        await tx.update("attachments", String(file.id), { token_hash: nextHash });
+      await tx.delete("sessions", oldHash);
     }
   });
   ctx.sessionHash = nextHash;
   ctx.newToken = raw;
   ctx.viewer = profileId
-    ? (
-        await ctx.db.query<Viewer>(
-          "SELECT id,name,email,phone,role,verified FROM profiles WHERE id=$1 AND active=true",
-          [profileId],
-        )
-      )[0] || null
+    ? toViewer(await repo.get("profiles", profileId))
     : null;
 }
 export function requireUser(ctx: Context) {
@@ -157,10 +154,15 @@ export function requireLeadership(ctx: Context) {
     throw new AppError("Бұл әрекет тек басшылыққа қолжетімді.", 403);
   return viewer;
 }
-export async function owns(ctx: Context, id: string, db = ctx.db) {
-  const rows = await db.query(
-    "SELECT 1 FROM private.feedback_access a WHERE a.feedback_id=$1 AND ((a.profile_id=$2 AND $2 IS NOT NULL) OR EXISTS(SELECT 1 FROM private.guest_grants g WHERE g.feedback_id=a.feedback_id AND g.token_hash=$3 AND g.expires_at>now()))",
-    [id, ctx.viewer?.id || null, ctx.sessionHash],
+export async function owns(ctx: Context, id: string, repo: Store = ctx.store) {
+  const access = await repo.get("feedback_access", id);
+  if (!access) return false;
+  if (ctx.viewer && access.profile_id === ctx.viewer.id) return true;
+  const grants = await repo.find("guest_grants", {
+    feedback_id: id,
+    token_hash: ctx.sessionHash,
+  });
+  return grants.some(
+    (grant) => Date.parse(String(grant.expires_at)) > Date.now(),
   );
-  return rows.length > 0;
 }

@@ -7,17 +7,17 @@ import {
   it,
   vi,
 } from "vitest";
-import { PGlite } from "@electric-sql/pglite";
-import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import type { Database } from "../src/server/db";
+import type { Store } from "../src/server/store/types";
 const state = vi.hoisted(() => ({
-  db: null as Database | null,
+  db: null as Store | null,
   mail: vi.fn(),
   remove: vi.fn(),
 }));
-vi.mock("../src/server/db", () => ({
-  database: async () => state.db,
+vi.mock("../src/server/storage", () => ({
+  store: async () => state.db,
+}));
+vi.mock("../src/server/mode", () => ({
   localMode: () => false,
 }));
 vi.mock("nodemailer", () => ({
@@ -26,34 +26,36 @@ vi.mock("nodemailer", () => ({
 vi.mock("../src/server/files", () => ({ removeObject: state.remove }));
 import { runJobs } from "../src/server/jobs";
 import { encrypt } from "../src/server/security";
-const engine = new PGlite();
 let post: string;
 beforeAll(async () => {
-  await engine.waitReady;
-  await engine.exec(
-    await readFile(
-      new URL(
-        "../supabase/migrations/202610190001_initial.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  const wrap = (client: Pick<PGlite, "query">): Database => ({
-    query: async <T>(sql: string, args: unknown[] = []) =>
-      (await client.query(sql, args)).rows as T[],
-    transaction: (fn) => engine.transaction((tx) => fn(wrap(tx))),
-  });
-  state.db = wrap(engine);
+  const { MemoryStore } = await import("../src/server/store/memory");
+  state.db = new MemoryStore();
 });
 beforeEach(async () => {
-  await state.db!.query("DELETE FROM private.jobs");
-  await state.db!.query("DELETE FROM feedback");
+  await state.db!.deleteWhere("jobs", {});
+  await state.db!.deleteWhere("feedback", {});
   post = randomUUID();
-  await state.db!.query(
-    "INSERT INTO feedback(id,type,title,body,anonymous,author_name) VALUES($1,'opinion','Сынақ мәтіні','Орынды сын пікірдің мәтіні.',true,NULL)",
-    [post],
-  );
+  await state.db!.insert("feedback", {
+    id: post,
+    number: 9000,
+    type: "opinion",
+    title: "Сынақ мәтіні",
+    body: "Орынды сын пікірдің мәтіні.",
+    course_id: null,
+    teacher_id: null,
+    custom_target: null,
+    anonymous: true,
+    author_name: null,
+    status: null,
+    outcome: null,
+    confirmed: false,
+    hidden: false,
+    hidden_reason: null,
+    deleted: false,
+    resolved_at: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
   vi.stubEnv(
     "APP_SECRET",
     "unit-test-only-random-secret-not-used-outside-tests",
@@ -67,13 +69,19 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.clearAllMocks();
 });
-afterAll(async () => engine.close());
 async function job(kind = "moderation", payload = "{}") {
   const id = randomUUID();
-  await state.db!.query(
-    "INSERT INTO private.jobs(id,kind,subject_id,payload) VALUES($1,$2,$3,$4)",
-    [id, kind, post, payload],
-  );
+  await state.db!.insert("jobs", {
+    id,
+    kind,
+    subject_id: post,
+    payload,
+    status: "pending",
+    attempts: 0,
+    available_at: new Date().toISOString(),
+    last_error: null,
+    created_at: new Date().toISOString(),
+  });
   return id;
 }
 it("flags suspicious content without hiding it or sending author metadata", async () => {
@@ -96,19 +104,9 @@ it("flags suspicious content without hiding it or sending author metadata", asyn
   vi.stubGlobal("fetch", request);
   await job();
   expect((await runJobs())[0].status).toBe("done");
+  expect((await state.db!.get("feedback", post))!.hidden).toBe(false);
   expect(
-    (
-      await state.db!.query<{ hidden: boolean }>(
-        "SELECT hidden FROM feedback WHERE id=$1",
-        [post],
-      )
-    )[0].hidden,
-  ).toBe(false);
-  expect(
-    await state.db!.query(
-      "SELECT 1 FROM private.moderation_flags WHERE feedback_id=$1",
-      [post],
-    ),
+    await state.db!.find("moderation_flags", { feedback_id: post }),
   ).toHaveLength(1);
 });
 it("retains posts and retries when the AI provider fails or returns invalid data", async () => {
@@ -118,17 +116,8 @@ it("retains posts and retries when the AI provider fails or returns invalid data
   );
   const id = await job();
   expect((await runJobs())[0].status).toBe("retry");
-  expect(
-    (
-      await state.db!.query<{ status: string }>(
-        "SELECT status FROM private.jobs WHERE id=$1",
-        [id],
-      )
-    )[0].status,
-  ).toBe("pending");
-  expect(
-    await state.db!.query("SELECT 1 FROM private.moderation_flags"),
-  ).toHaveLength(0);
+  expect((await state.db!.get("jobs", id))!.status).toBe("pending");
+  expect(await state.db!.all("moderation_flags")).toHaveLength(0);
 });
 it("preserves encrypted email tasks after a delivery failure", async () => {
   vi.stubEnv("SMTP_PASS", "test-only");
@@ -156,14 +145,26 @@ it("leaves moderation queued when no provider credentials are configured", async
 it("moderates each comment separately and clears its flag after deletion", async () => {
   const person = randomUUID(),
     commentId = randomUUID();
-  await state.db!.query(
-    "INSERT INTO profiles(id,name,email,phone) VALUES($1,'Тест авторы',$2,'+77000000000')",
-    [person, `${person}@example.com`],
-  );
-  await state.db!.query(
-    "INSERT INTO comments(id,feedback_id,profile_id,body) VALUES($1,$2,$3,'Талқылаудағы жеке мәтін')",
-    [commentId, post, person],
-  );
+  await state.db!.insert("profiles", {
+    id: person,
+    name: "Тест авторы",
+    email: `${person}@example.com`,
+    phone: "+77000000000",
+    role: "user",
+    verified: true,
+    active: true,
+    created_at: new Date().toISOString(),
+  });
+  await state.db!.insert("comments", {
+    id: commentId,
+    feedback_id: post,
+    profile_id: person,
+    parent_id: null,
+    body: "Талқылаудағы жеке мәтін",
+    deleted: false,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
   const request = vi.fn(async (_url: unknown, init: RequestInit) => {
     expect(String(init.body)).toContain("Талқылаудағы жеке мәтін");
     expect(String(init.body)).not.toContain("Тест авторы");
@@ -181,23 +182,14 @@ it("moderates each comment separately and clears its flag after deletion", async
   await job("moderation", JSON.stringify({ commentId }));
   await runJobs();
   expect(
-    await state.db!.query(
-      "SELECT 1 FROM private.moderation_flags WHERE source=$1",
-      [`ai:${commentId}`],
-    ),
+    await state.db!.find("moderation_flags", { source: `ai:${commentId}` }),
   ).toHaveLength(1);
-  await state.db!.query(
-    "UPDATE comments SET deleted=true,body='' WHERE id=$1",
-    [commentId],
-  );
+  await state.db!.update("comments", commentId, { deleted: true, body: "" });
   request.mockClear();
   await job("moderation", JSON.stringify({ commentId }));
   await runJobs();
   expect(request).not.toHaveBeenCalled();
   expect(
-    await state.db!.query(
-      "SELECT 1 FROM private.moderation_flags WHERE source=$1",
-      [`ai:${commentId}`],
-    ),
+    await state.db!.find("moderation_flags", { source: `ai:${commentId}` }),
   ).toHaveLength(0);
 });

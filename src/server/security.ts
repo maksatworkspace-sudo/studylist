@@ -8,7 +8,8 @@ import {
 } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { localMode, type Database } from "./db";
+import { localMode } from "./mode";
+import type { Store } from "./store/types";
 
 export class AppError extends Error {
   constructor(
@@ -76,19 +77,37 @@ export async function decrypt(value: string) {
     decipher.final(),
   ]).toString("utf8");
 }
+/**
+ * Fixed-window limiter in the rate_limits table with the same reset
+ * semantics as the original SQL upsert. Production limits are unchanged.
+ */
 export async function rateLimit(
-  db: Database,
+  repo: Store,
   id: string,
   max: number,
   seconds: number,
 ) {
-  const rows = await db.query<{ count: number }>(
-    `INSERT INTO private.rate_limits(key,count,resets_at) VALUES($1,1,now()+$2*interval '1 second')
-    ON CONFLICT(key) DO UPDATE SET count=CASE WHEN private.rate_limits.resets_at<now() THEN 1 ELSE private.rate_limits.count+1 END,
-    resets_at=CASE WHEN private.rate_limits.resets_at<now() THEN now()+$2*interval '1 second' ELSE private.rate_limits.resets_at END RETURNING count`,
-    [id, seconds],
-  );
-  if (rows[0].count > max)
+  const now = Date.now();
+  let count: number;
+  const existing = await repo.get("rate_limits", id);
+  if (!existing) {
+    await repo.insert("rate_limits", {
+      key: id,
+      count: 1,
+      resets_at: new Date(now + seconds * 1000).toISOString(),
+    });
+    count = 1;
+  } else if (Date.parse(String(existing.resets_at)) < now) {
+    await repo.update("rate_limits", id, {
+      count: 1,
+      resets_at: new Date(now + seconds * 1000).toISOString(),
+    });
+    count = 1;
+  } else {
+    count = Number(existing.count) + 1;
+    await repo.update("rate_limits", id, { count });
+  }
+  if (count > max)
     throw new AppError(
       "Әрекет тым жиі қайталанды. Біраздан кейін қайталап көріңіз.",
       429,
