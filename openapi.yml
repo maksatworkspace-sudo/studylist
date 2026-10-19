@@ -1,0 +1,518 @@
+openapi: 3.1.0
+info:
+  title: MAXBALL EDTECH feedback API
+  version: 1.0.0
+  summary: Feedback platform for the MAXBALL EDTECH study center.
+  description: >
+    Single-page application backed by /api/state reads and one discriminated
+    action endpoint. All state-changing requests are same-origin (CSRF
+    protected), cookie-session authenticated, rate limited per IP
+    (180 requests/60s overall; tighter per-action buckets) and capped at
+    100000 bytes. Errors are always {"error": string} with a meaningful
+    status code. This document is the contract the mockService (#5), the
+    repositories (#9/#10) and the connected frontend (#11) must satisfy.
+servers:
+  - url: /
+    description: Same-origin application server.
+paths:
+  /api/state:
+    get:
+      operationId: bootState
+      summary: Initial application state (feed, catalog, viewer, stats).
+      parameters:
+        - in: query
+          name: from
+          description: Inclusive ISO date lower bound for statistics.
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          description: Inclusive ISO date upper bound for statistics.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Boot payload for anonymous or authenticated viewers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Boot" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /api/state/{post}:
+    get:
+      operationId: postDetail
+      summary: Full detail of one feedback post.
+      description: Requested as /api/state?post={uuid}; hidden posts 404 for
+        viewers without moderation rights; contact data only for managers and
+        never for anonymous authors.
+      parameters:
+        - in: query
+          name: post
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Post detail with comments, replies, attachments, history.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Detail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /api/actions:
+    post:
+      operationId: action
+      summary: Discriminated state-changing endpoint for all 37 actions.
+      description: Same-origin enforced; 100000-byte body cap; per-IP request
+        rate limit 180/60s plus per-action buckets (posts 12/600s, guest code
+        5/600s, recovery 3/600s, comments 30/60s, uploads 20/3600s). Unknown
+        action names are rejected 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionRequest"
+      responses:
+        "200":
+          description: Action result; sets the session cookie when issued.
+          headers:
+            Set-Cookie:
+              description: httpOnly maxball_session token (14 days) on login,
+                guest ownership, register or staff creation.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Result" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /api/files/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: downloadFile
+      summary: Download an attachment (attachment disposition).
+      description: Guests may fetch only their own posts' files; managers may
+        fetch any; other users receive 403. Local mode streams from the
+        private upload directory.
+      responses:
+        "200":
+          description: File bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/ServerError" }
+    put:
+      operationId: uploadFile
+      summary: Upload bytes for a prepared local-mode attachment.
+      description: URL is issued by the prepareUpload action in local mode;
+        the completeUpload action finalizes and quarantines the record.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200": { description: Bytes stored. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /api/export:
+    get:
+      operationId: exportReport
+      summary: Excel statistics report (admin/leadership only).
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: xlsx workbook.
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/ServerError" }
+  /api/jobs:
+    post:
+      operationId: runJobsWorker
+      summary: Email/AI worker tick (bearer token, not a user action).
+      security:
+        - jobsBearer: []
+      responses:
+        "200":
+          description: Worker results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/ServerError" }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: maxball_session
+    jobsBearer:
+      type: http
+      scheme: bearer
+  responses:
+    BadRequest:
+      description: Invalid fields, lengths or action name.
+      content: &errorContent
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Authentication required or invalid credentials.
+      content: *errorContent
+    Forbidden:
+      description: CSRF failure, missing role or private resource.
+      content: *errorContent
+    NotFound:
+      description: Missing or hidden resource.
+      content: *errorContent
+    Conflict:
+      description: Duplicate name/email or immutable-record violation.
+      content: *errorContent
+    TooLarge:
+      description: Request over the 100000-byte or file-size cap.
+      content: *errorContent
+    RateLimited:
+      description: Per-IP or per-action rate limit exceeded.
+      content: *errorContent
+    ServerError:
+      description: Unexpected failure; safe to retry without data loss.
+      content: *errorContent
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Role: { type: string, enum: [user, teacher, admin, leadership] }
+    FeedbackType: { type: string, enum: [opinion, suggestion, issue] }
+    Status: { type: string, enum: [new, reviewing, resolved, in_progress, reviewed] }
+    Result:
+      type: object
+      properties:
+        ok: { type: boolean }
+        id: { type: string, format: uuid }
+        number: { type: integer, minimum: 1 }
+        code: { type: [string, "null"] }
+        message: { type: string }
+        localToken: { type: string }
+        tokenPurpose: { type: string }
+        url: { type: string }
+        local: { type: boolean }
+        duplicate: { type: boolean }
+    Viewer:
+      type: object
+      required: [id, name, email, phone, role, verified]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        verified: { type: boolean }
+        active: { type: boolean }
+    Teacher:
+      type: object
+      required: [id, name, subject, color, average, count, myStars, myComment, reviews]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        subject: { type: string }
+        color: { type: string }
+        average: { type: number }
+        count: { type: integer }
+        myStars: { type: integer }
+        myComment: { type: string }
+        reviews:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              stars: { type: integer }
+              comment: { type: string }
+              date: { type: string }
+    Post:
+      type: object
+      required: [id, number, type, title, body, anonymous, authorName, confirmed, hidden, createdAt, updatedAt, supports, comments, supported, saved, isOwner, canEdit, answered, flagged]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: integer }
+        type: { $ref: "#/components/schemas/FeedbackType" }
+        title: { type: string }
+        body: { type: string }
+        course: { type: [string, "null"] }
+        teacher: { type: [string, "null"] }
+        customTarget: { type: [string, "null"] }
+        courseId: { type: [string, "null"], format: uuid }
+        teacherId: { type: [string, "null"], format: uuid }
+        anonymous: { type: boolean }
+        authorName: { type: string }
+        status: { type: [string, "null"], enum: [new, reviewing, resolved, in_progress, reviewed, null] }
+        outcome: { type: [string, "null"] }
+        confirmed: { type: boolean }
+        hidden: { type: boolean }
+        hiddenReason: { type: [string, "null"] }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+        supports: { type: integer }
+        comments: { type: integer }
+        supported: { type: boolean }
+        saved: { type: boolean }
+        isOwner: { type: boolean }
+        canEdit: { type: boolean }
+        answered: { type: boolean }
+        flagged: { type: boolean }
+    Statistics:
+      type: object
+      required: [total, resolved, reviewing, resolutionHours, monthly, types, courses, instructors, statuses, comparison]
+      properties:
+        total: { type: integer }
+        resolved: { type: integer }
+        reviewing: { type: integer }
+        resolutionHours: { type: number }
+        monthly:
+          type: array
+          items:
+            type: object
+            properties: { month: { type: string }, count: { type: integer } }
+        types:
+          type: array
+          items:
+            type: object
+            properties: { type: { type: string }, count: { type: integer } }
+        courses:
+          type: array
+          items:
+            type: object
+            properties: { name: { type: string }, count: { type: integer } }
+        instructors:
+          type: array
+          items:
+            type: object
+            properties: { name: { type: string }, count: { type: integer } }
+        statuses:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { $ref: "#/components/schemas/Status" }
+              count: { type: integer }
+        comparison:
+          type: object
+          properties: { current: { type: integer }, previous: { type: integer } }
+    Notice:
+      type: object
+      required: [id, title, read, createdAt]
+      properties:
+        id: { type: string }
+        feedbackId: { type: [string, "null"] }
+        title: { type: string }
+        read: { type: boolean }
+        createdAt: { type: string }
+    Boot:
+      type: object
+      required: [viewer, demo, posts, courses, teachers, notifications, staff]
+      properties:
+        viewer: { type: [object, "null"] }
+        demo: { type: boolean }
+        posts:
+          type: array
+          items: { $ref: "#/components/schemas/Post" }
+        courses:
+          type: array
+          items:
+            type: object
+            properties: { id: { type: string }, name: { type: string } }
+        teachers:
+          type: array
+          items: { $ref: "#/components/schemas/Teacher" }
+        notifications:
+          type: array
+          items: { $ref: "#/components/schemas/Notice" }
+        staff:
+          type: array
+          items: { $ref: "#/components/schemas/Viewer" }
+        catalog:
+          type: [object, "null"]
+          properties:
+            courses:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  active: { type: boolean }
+            teachers:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+                  subject: { type: string }
+                  active: { type: boolean }
+        stats: { type: [object, "null"] }
+        integrations:
+          type: [object, "null"]
+          properties:
+            email: { type: boolean }
+            ai: { type: boolean }
+            storage: { type: boolean }
+    Detail:
+      type: object
+      required: [post, contact, moderationReasons, replies, comments, attachments, history]
+      properties:
+        post: { $ref: "#/components/schemas/Post" }
+        contact:
+          type: [object, "null"]
+          properties:
+            email: { type: string }
+            phone: { type: string }
+        moderationReasons:
+          type: array
+          items: { type: string }
+        replies:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              body: { type: string }
+              createdAt: { type: string }
+        comments:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              role: { $ref: "#/components/schemas/Role" }
+              body: { type: string }
+              parentId: { type: [string, "null"] }
+              mine: { type: boolean }
+              deleted: { type: boolean }
+              createdAt: { type: string }
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              size: { type: integer }
+              mime: { type: string }
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { $ref: "#/components/schemas/Status" }
+              outcome: { type: [string, "null"] }
+              createdAt: { type: string }
+    ActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum:
+            - demoLogin
+            - logout
+            - login
+            - register
+            - resendConfirmation
+            - confirmEmail
+            - exchangeSession
+            - forgotPassword
+            - resetPassword
+            - updateProfile
+            - createStaff
+            - createPost
+            - unlockPost
+            - recoverPost
+            - resetGuestCode
+            - toggleSupport
+            - toggleBookmark
+            - editPost
+            - deletePost
+            - comment
+            - editComment
+            - deleteComment
+            - rateTeacher
+            - officialReply
+            - setStatus
+            - resolution
+            - moderate
+            - readNotifications
+            - addCourse
+            - addTeacher
+            - setRole
+            - updateCatalog
+            - setAccountActive
+            - prepareUpload
+            - completeUpload
+            - discardUpload
+            - runJobs
+        # Per-action payload fields (union of optional inputs; validation and
+        # authorization are enforced server-side per action):
+        role: { $ref: "#/components/schemas/Role" }
+        email: { type: string, format: email }
+        password: { type: string, maxLength: 100 }
+        name: { type: string }
+        phone: { type: string }
+        token: { type: string }
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        requestId: { type: string, format: uuid }
+        type: { $ref: "#/components/schemas/FeedbackType" }
+        title: { type: string, maxLength: 160 }
+        body: { type: string, maxLength: 10000 }
+        anonymous: { type: boolean }
+        attachments: { type: array, items: { type: string, format: uuid } }
+        id: { type: string, format: uuid }
+        number: { type: integer, minimum: 1 }
+        code: { type: string }
+        resolved: { type: boolean }
+        stars: { type: integer, minimum: 1, maximum: 5 }
+        comment: { type: string }
+        parentId: { type: [string, "null"], format: uuid }
+        status: { $ref: "#/components/schemas/Status" }
+        outcome: { type: string }
+        mode: { type: string, enum: [hide, unhide] }
+        reason: { type: string }
+        subject: { type: string }
+        color: { type: string }
+        active: { type: boolean }
+        size: { type: integer }
+        mime: { type: string }
+        target: { type: string, enum: [course, teacher] }
