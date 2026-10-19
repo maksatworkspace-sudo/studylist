@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import type { Boot, FeedbackType, Teacher } from "@/lib/types";
 import { roleLabels, typeLabels } from "@/lib/types";
-import { send, size, type Result } from "@/lib/client";
+import { send, size, uploadFile, type Result } from "@/lib/client";
 import { CopyButton, Dialog, Field, Form } from "./ui";
 
 type Upload = {
@@ -47,32 +47,8 @@ export function Compose({
     update(item, { state: "loading", error: "", progress: 0 });
     try {
       if (item.id) await send("discardUpload", { id: item.id });
-      const prepared = await send("prepareUpload", {
-        name: item.file.name,
-        mime: item.file.type || "application/octet-stream",
-        size: item.file.size,
-      });
-      update(item, { id: prepared.id });
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("PUT", prepared.url!);
-        xhr.setRequestHeader(
-          "Content-Type",
-          item.file.type || "application/octet-stream",
-        );
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable)
-            update(item, { progress: Math.round((e.loaded / e.total) * 100) });
-        };
-        xhr.onload = () =>
-          xhr.status >= 200 && xhr.status < 300
-            ? resolve()
-            : reject(new Error("Файл жүктелмеді."));
-        xhr.onerror = () => reject(new Error("Байланыс үзілді."));
-        xhr.send(item.file);
-      });
-      await send("completeUpload", { id: prepared.id });
-      update(item, { state: "ready", progress: 100 });
+      const prepared = await uploadFile(item.file, (progress) => update(item, { progress }));
+      update(item, { id: prepared.id, state: "ready", progress: 100 });
     } catch (e) {
       update(item, {
         state: "failed",

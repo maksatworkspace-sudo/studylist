@@ -24,7 +24,7 @@ import {
   isManager,
   statusLabels,
 } from "@/lib/types";
-import { date, initials, read, send, size } from "@/lib/client";
+import { date, downloadFile, initials, read, send, size } from "@/lib/client";
 import { CopyButton, Dialog, Field, Form, StatusBadge, Tag } from "./ui";
 
 export default function PostDetail({
@@ -170,7 +170,10 @@ export default function PostDetail({
         {detail.attachments.length > 0 && (
           <div className="file-list">
             {detail.attachments.map((f) => (
-              <a href={`/api/files/${f.id}`} key={f.id} className="file-link">
+              <a href="#" key={f.id} className="file-link" onClick={(event) => {
+                event.preventDefault();
+                void downloadFile(f.id).catch((error) => toast(error.message));
+              }}>
                 <Download size={17} />
                 <span>
                   {f.name}

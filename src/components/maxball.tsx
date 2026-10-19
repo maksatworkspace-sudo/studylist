@@ -41,10 +41,12 @@ import type { Boot, FeedbackType, Post, Role, Teacher } from "@/lib/types";
 import { isManager, roleLabels, statusLabels, typeLabels } from "@/lib/types";
 import {
   date,
+  exportReport,
   initials,
   read,
   send,
   teacherColor,
+  temporaryPreview,
   type Result,
 } from "@/lib/client";
 import {
@@ -429,7 +431,7 @@ export default function Maxball() {
                 <label className="demo-control">
                   <span>
                     <span className="live-dot" />
-                    Сынақ ортасы
+                    {temporaryPreview() ? "Уақытша сынақ" : "Сынақ ортасы"}
                   </span>
                   <select
                     aria-label="Сынақ рөлі"
@@ -934,7 +936,11 @@ export default function Maxball() {
                   </button>
                   <a
                     className="btn primary"
-                    href={`/api/export?${new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) })}`}
+                    href="#"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      void exportReport({ from, to }).catch((error) => toast(error.message));
+                    }}
                   >
                     <Download size={17} />
                     Excel

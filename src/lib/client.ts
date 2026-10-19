@@ -1,34 +1,36 @@
-export type Result = {
-  ok?: boolean;
-  id?: string;
-  number?: number;
-  code?: string;
-  message?: string;
-  localToken?: string;
-  tokenPurpose?: string;
-  url?: string;
-  local?: boolean;
-};
+import { appService } from "@/services";
+import { actionNames, ServiceError } from "@/services/types";
+import type { ActionInputs, ActionName, DateRange, Download, Progress, Result } from "@/services/types";
+export type { Result } from "@/services/types";
+
 export async function read<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
-  const data = await response.json();
-  if (!response.ok)
-    throw new Error(data.error || "Байланыс үзілді. Қайта көріңіз.");
-  return data;
+  const parsed = new URL(url, "http://service.local");
+  if (parsed.pathname !== "/api/state") throw new ServiceError("Қолдау көрсетілмейтін сұраныс.");
+  const post = parsed.searchParams.get("post");
+  return (post ? await appService().detail(post) : await appService().boot({
+    from: parsed.searchParams.get("from") || undefined,
+    to: parsed.searchParams.get("to") || undefined,
+  })) as T;
 }
 export async function send(
   action: string,
   input: Record<string, unknown> = {},
 ): Promise<Result> {
-  const response = await fetch("/api/actions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, ...input }),
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Сұраныс орындалмады.");
-  return data;
+  if (!actionNames.includes(action as ActionName))
+    throw new ServiceError(`Қолдау көрсетілмейтін әрекет: ${action}`);
+  return appService().send(action as ActionName, input as ActionInputs[ActionName]);
 }
+export const uploadFile = (file: File, progress?: Progress) => appService().upload(file, progress);
+export const temporaryPreview = () => appService().mode === "mock";
+function saveDownload(file: Download) {
+  const url = URL.createObjectURL(file.blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = file.name; document.body.appendChild(link);
+  link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+export async function downloadFile(id: string) { saveDownload(await appService().download(id)); }
+export async function exportReport(range: DateRange) { saveDownload(await appService().exportReport(range)); }
 export const date = (value: string) => {
   const parts = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
