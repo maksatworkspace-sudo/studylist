@@ -65,14 +65,12 @@ The final E2E acceptance run targets the default real SQLite mode.
 
 ## Browser phase status
 
-`@playwright/test` is not yet a dependency (ownership transfer pending, per
-the multi-agent dependency protocol). Until it transfers, the `e2e` phase
-prints an explicit **PENDING** result — not a skip and not a pass — and
-`--strict` (used by CI once activated) turns it into a failure. Activation:
-
-1. Install `@playwright/test` as a devDependency (dependency slot permitting).
-2. `npx playwright install chromium`.
-3. Flip CI to `node scripts/verify.mts --strict`.
+`@playwright/test` is installed. Locally, if the pinned Playwright chromium
+build is unavailable (the CDN is unreachable on some networks) the config
+falls back to the system Google Chrome via `channel: "chrome"`; CI installs
+the pinned build with `npx playwright install --with-deps chromium`. CI runs
+the runner in `--strict` mode for both the real-backend suite and the
+mock-mode zero-API-traffic proof.
 
 ## Negative controls (AC7)
 

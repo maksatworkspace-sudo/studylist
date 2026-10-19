@@ -29,6 +29,7 @@
     }
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.1",
     "@tailwindcss/postcss": "^4.1.0",
     "@types/node": "^24.0.0",
     "@types/nodemailer": "8.0.2",

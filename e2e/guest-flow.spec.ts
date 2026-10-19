@@ -2,30 +2,59 @@
 // Receipt codes are treated as secrets: they are proven present/usable but
 // never asserted by value, logged, or screenshotted unmasked.
 import { expect, test, type Page } from "@playwright/test";
+/** Closes any open native modal dialog (Escape cancels; X is the fallback). */
+async function closeOpenDialogs(page: Page) {
+  for (let i = 0; i < 3; i++) {
+    const dialog = page.getByRole("dialog");
+    if (!(await dialog.isVisible())) return;
+    await page.keyboard.press("Escape");
+    try {
+      await expect(dialog).toBeHidden({ timeout: 2_000 });
+    } catch {
+      await dialog.locator(".dialog-header button").first().click();
+      await expect(dialog).toBeHidden();
+    }
+  }
+}
 
-/** Submits feedback as a guest and leaves the receipt dialog open. */
+
+/** Opens the compose dialog (the form lives behind the Жазба қалдыру CTA). */
+async function openComposer(page: Page) {
+  await page.getByRole("button", { name: "Жазба қалдыру" }).first().click();
+}
+
+/** Submits feedback as a named guest and leaves the receipt dialog open. */
 async function submitGuestFeedback(page: Page, title: string, body: string) {
   await page.goto("/");
-  await page
+  await openComposer(page);
+  const form = page
     .locator("form")
     .filter({ has: page.getByPlaceholder("Не туралы айтқыңыз келеді?") })
-    .first()
-    .locator('input[name="title"]')
-    .fill(title);
-  await page.getByPlaceholder("Ойыңызды, ұсынысыңызды немесе мәселеңізді жазыңыз").fill(body);
-  await page.getByRole("button", { name: "Жариялау" }).click();
+    .first();
+  await form.locator('input[name="title"]').fill(title);
+  await form
+    .getByPlaceholder("Ойыңызды, ұсынысыңызды немесе мәселеңізді жазыңыз")
+    .fill(body);
+  await form.locator('input[name="authorName"]').fill("Браузер Тексеруші");
+  await form.getByRole("button", { name: "Жариялау" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(".secret-code code")).toBeVisible();
   return dialog;
 }
 
+// The header brand button is viewport-independent; the text "MAXBALL EDTECH"
+// also appears in the sidebar copyright, which is hidden on narrow layouts.
+const brand = (page: import("@playwright/test").Page) => page.getByRole("button", { name: "MAXBALL EDTECH басты беті" });
+
 test.describe("guest flow", () => {
   test("public feed renders seeded content and non-blank assets", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByText("MAXBALL EDTECH").first()).toBeVisible();
+    await expect(brand(page)).toBeVisible();
     // Seeded demo posts must render as real content, not a blank shell.
-    await expect(page.locator("article, .post, li").filter({ hasText: /./ }).first()).toBeVisible();
+    await expect(
+      page.locator("article, .post, li").filter({ hasText: /./ }).first(),
+    ).toBeVisible();
     // Logo/images must actually load (non-zero natural size).
     const images = page.locator("img");
     const count = await images.count();
@@ -42,17 +71,23 @@ test.describe("guest flow", () => {
       title,
       "Қонақ ретінде жіберілген толық мәтінді тексеру.",
     );
-    // The dialog explains the number + code requirement and keeps focus inside.
-    await expect(dialog).toContainText(/№|нөмірі/i);
+    await expect(dialog).toContainText(/№\s*\d+/);
     const focused = await dialog.evaluate((node) => node.contains(document.activeElement));
     expect(focused).toBe(true);
-    await dialog.getByRole("button", { name: /жабу|түсінікті|дайын/i }).click().catch(() => {});
-    // The new post appears in the public feed for everyone, anonymously.
+    // Close exactly via the receipt's own button; the dialog X also matches
+    // generic close names, so an exact name avoids strict-mode ambiguity.
+    await dialog.getByRole("button", { name: "Түсінікті" }).click();
+    // The app then opens the new post's detail dialog automatically.
+    const detail = page.getByRole("dialog");
+    await expect(detail.getByText(title).first()).toBeVisible();
+    await closeOpenDialogs(page);
+    // The new post appears in the public feed for everyone.
     await expect(page.getByText(title).first()).toBeVisible();
   });
 
   test("validation failure preserves typed input", async ({ page }) => {
     await page.goto("/");
+    await openComposer(page);
     const form = page
       .locator("form")
       .filter({ has: page.getByPlaceholder("Не туралы айтқыңыз келеді?") })
@@ -62,7 +97,7 @@ test.describe("guest flow", () => {
       .getByPlaceholder("Ойыңызды, ұсынысыңызды немесе мәселеңізді жазыңыз")
       .fill("т");
     await form.getByRole("button", { name: "Жариялау" }).click();
-    // The browser/app validation error surfaces and the typed title survives.
+    // Native/app validation surfaces and the typed title survives.
     await expect(form.locator('input[name="title"]')).toHaveValue("аб");
   });
 
@@ -78,22 +113,25 @@ test.describe("guest flow", () => {
     const numberText =
       (await dialog.getByText(/№\s*\d+/).first().textContent())?.match(/\d+/)?.[0] ?? "";
     expect(receipt?.length ?? 0).toBeGreaterThan(0);
-    await dialog.getByRole("button", { name: /жабу|түсінікті|дайын/i }).click().catch(() => {});
+    await dialog.getByRole("button", { name: "Түсінікті" }).click();
+    await closeOpenDialogs(page);
 
-    // A wrong code must be denied.
-    await page.getByRole("button", { name: "Өтінішті табу" }).click();
-    let finder = page.getByRole("dialog");
+    // Open the receipt finder. force:true because the click itself opens a
+    // native modal that would otherwise trip Playwright's hit-target check.
+    await page.getByRole("button", { name: "Өтінішті табу" }).click({ force: true });
+    const finder = page.getByRole("dialog");
+    await expect(finder).toBeVisible();
+
+    // A wrong code must be denied; the dialog stays open with the error.
     await finder.locator('input[name="number"]').fill(numberText);
     await finder.locator('input[name="code"]').fill("definitely-wrong-code");
-    await finder.getByRole("button", { name: "Жіберу" }).click();
+    await finder.locator('button[type="submit"]').click();
     await expect(page.locator(".error, [role=alert]").first()).toBeVisible();
 
-    // The real receipt reopens the guest's own post.
-    await page.getByRole("button", { name: "Өтінішті табу" }).click();
-    finder = page.getByRole("dialog");
+    // The real receipt reopens the guest's own post (same dialog, refill).
     await finder.locator('input[name="number"]').fill(numberText);
     await finder.locator('input[name="code"]').fill(receipt!);
-    await finder.getByRole("button", { name: "Жіберу" }).click();
+    await finder.locator('button[type="submit"]').click();
     await expect(page.getByText(title).first()).toBeVisible();
   });
 });

@@ -3,10 +3,24 @@
 // "Сынақ рөлі"]) which maps to the real demoLogin action — the same session,
 // permission and privacy code paths as production roles.
 import { expect, test, type Page } from "@playwright/test";
+/** Closes any open native modal dialog (Escape cancels; X is the fallback). */
+async function closeOpenDialogs(page: Page) {
+  for (let i = 0; i < 3; i++) {
+    const dialog = page.getByRole("dialog");
+    if (!(await dialog.isVisible())) return;
+    await page.keyboard.press("Escape");
+    try {
+      await expect(dialog).toBeHidden({ timeout: 2_000 });
+    } catch {
+      await dialog.locator(".dialog-header button").first().click();
+      await expect(dialog).toBeHidden();
+    }
+  }
+}
+
 
 async function switchRole(page: Page, role: "guest" | "user" | "teacher" | "admin" | "leadership") {
   await page.locator('select[aria-label="Сынақ рөлі"]').selectOption(role);
-  // The switch issues demoLogin/logout; wait for the UI to settle on the role.
   await expect(page.locator('select[aria-label="Сынақ рөлі"]')).toHaveValue(role);
 }
 
@@ -14,17 +28,21 @@ test.describe("roles, privacy and denials", () => {
   test("anonymous post hides the author identity from managers", async ({ page }) => {
     await page.goto("/");
     await switchRole(page, "guest");
-    await page
+    await page.getByRole("button", { name: "Жазба қалдыру" }).first().click();
+    const form = page
       .locator("form")
       .filter({ has: page.getByPlaceholder("Не туралы айтқыңыз келеді?") })
-      .first()
-      .locator('input[name="title"]')
-      .fill(`Жасырын сынақ ${Date.now()}`);
-    await page
+      .first();
+    await form.locator('input[name="title"]').fill(`Жасырын сынақ ${Date.now()}`);
+    await form
       .getByPlaceholder("Ойыңызды, ұсынысыңызды немесе мәселеңізді жазыңыз")
       .fill("Анонимді автордың жеке деректері жасырылуы тиіс.");
-    await page.getByRole("button", { name: "Жариялау" }).click();
-    await expect(page.getByRole("dialog").locator(".secret-code code")).toBeVisible();
+    await form.getByText("Анонимді жариялау").click();
+    await form.getByRole("button", { name: "Жариялау" }).click();
+    const receipt = page.getByRole("dialog");
+    await expect(receipt.locator(".secret-code code")).toBeVisible();
+    await receipt.getByRole("button", { name: "Түсінікті" }).click();
+    await closeOpenDialogs(page);
 
     await switchRole(page, "admin");
     await expect(page.getByText("Анонимді автор").first()).toBeVisible();
@@ -38,7 +56,6 @@ test.describe("roles, privacy and denials", () => {
     await expect(page.getByRole("button", { name: "Өтінішті табу" })).toBeVisible();
 
     await switchRole(page, "user");
-    // A plain user must not see admin moderation/status controls.
     await expect(page.getByRole("button", { name: /Жасыру/ })).toHaveCount(0);
     await expect(page.getByText("Мәртебені сақтау")).toHaveCount(0);
 
@@ -49,10 +66,13 @@ test.describe("roles, privacy and denials", () => {
   test("teacher ratings: a signed-in user can rate, a guest is denied", async ({ page }) => {
     await page.goto("/");
     await switchRole(page, "user");
-    // Open the teachers area and rate the first teacher with five stars.
-    await page.getByRole("button", { name: /Оқытушылар/ }).click().catch(async () => {
-      await page.getByText(/Оқытушылар/).first().click();
-    });
+    await page.getByRole("button", { name: "Оқытушылар" }).click();
+    // Open the rating dialog for the first teacher (seeded demo users may
+    // already have rated, so the button reads "change rating" instead).
+    await page
+      .getByRole("button", { name: /Бағалау|Бағаны өзгерту/ })
+      .first()
+      .click();
     const rating = page
       .locator("form")
       .filter({ has: page.getByPlaceholder("Оқытушы туралы ойыңыз") })
@@ -60,28 +80,44 @@ test.describe("roles, privacy and denials", () => {
     await rating.getByRole("button", { name: "5 жұлдыз" }).click();
     await rating.getByPlaceholder("Оқытушы туралы ойыңыз").fill("Браузер сынағы: өте жақсы!");
     await rating.getByRole("button", { name: "Бағаны сақтау" }).click();
-    await expect(page.getByText("Браузер сынағы: өте жақсы!").first()).toBeVisible();
+    await expect(rating).toBeHidden();
+    // Round-trip proof: reopen the rating dialog and read our comment back.
+    await page
+      .getByRole("button", { name: /Бағалау|Бағаны өзгерту/ })
+      .first()
+      .click();
+    const reopened = page
+      .locator("form")
+      .filter({ has: page.getByPlaceholder("Оқытушы туралы ойыңыз") })
+      .first();
+    await expect(reopened.getByPlaceholder("Оқытушы туралы ойыңыз")).toHaveValue(
+      "Браузер сынағы: өте жақсы!",
+    );
+    await closeOpenDialogs(page);
 
+    // A guest clicking the same action gets the login dialog, not the form.
     await switchRole(page, "guest");
-    await expect(page.getByPlaceholder("Оқытушы туралы ойыңыз")).toHaveCount(0);
+    await page.getByRole("button", { name: "Оқытушылар" }).click();
+    await page
+      .getByRole("button", { name: /Бағалау|Бағаны өзгерту/ })
+      .first()
+      .click();
+    await expect(page.getByPlaceholder("name@example.com")).toBeVisible();
   });
 
-  test("feed filtering narrows the visible posts", async ({ page }) => {
+  test("feed filtering narrows the visible posts and resets cleanly", async ({ page }) => {
     await page.goto("/");
-    const before = await page.locator("article, .post, li a").count();
+    const meta = page.getByText(/\d+ жазба/).first();
+    const before = Number((await meta.textContent())?.match(/\d+/)?.[0] ?? 0);
+    expect(before).toBeGreaterThan(0);
+
     await page.getByRole("button", { name: "Сүзгілер" }).click();
-    // Filter to "Мәселе" (issue) type and expect the list to re-render.
-    const typeSelect = page
-      .locator("select")
-      .filter({ has: page.getByRole("option", { name: "Мәселе" }) })
-      .first();
-    await typeSelect.selectOption("issue");
-    await page.waitForTimeout(300);
-    const after = await page.locator("article, .post, li a").count();
-    expect(after).toBeLessThanOrEqual(before);
-    // Resetting the filter restores the full list.
-    await typeSelect.selectOption("all");
-    await page.waitForTimeout(300);
-    await expect(page.locator("article, .post, li a")).toHaveCount(before);
+    const statusSelect = page.locator('select[aria-label="Мәртебе бойынша сүзгі"]');
+    await statusSelect.selectOption("resolved");
+    const filtered = Number((await meta.textContent())?.match(/\d+/)?.[0] ?? 0);
+    expect(filtered).toBeLessThanOrEqual(before);
+
+    await page.getByRole("button", { name: "Тазарту" }).click();
+    await expect(meta).toHaveText(new RegExp(`${before} жазба`));
   });
 });

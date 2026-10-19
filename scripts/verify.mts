@@ -107,19 +107,26 @@ export function parseArgs(argv: string[]): {
   phases: PhaseName[];
   strict: boolean;
   keep: boolean;
+  mode: "http" | "mock";
   selfTest?: "busy-port" | "failing-command" | "missing-env";
 } {
   const options = {
     phases: ["http", "e2e", "restart"] as PhaseName[],
     strict: false,
     keep: false,
+    mode: "http" as "http" | "mock",
     selfTest: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--strict") options.strict = true;
     else if (arg === "--keep") options.keep = true;
-    else if (arg === "--phase") {
+    else if (arg === "--mode") {
+      const value = argv[++i] as "http" | "mock";
+      if (value !== "http" && value !== "mock")
+        throw new VerifyError("--mode requires http or mock.");
+      options.mode = value;
+    } else if (arg === "--phase") {
       const value = argv[++i];
       if (!value) throw new VerifyError("--phase requires a list, e.g. http,restart");
       const phases = value.split(",").map((p) => p.trim()) as PhaseName[];
@@ -170,13 +177,17 @@ export function validateEnvironment(env: NodeJS.ProcessEnv): {
 }
 
 /** Builds the child environment: sanitized, with controlled test secrets. */
-export function buildChildEnv(base: NodeJS.ProcessEnv, baseUrl: string): NodeJS.ProcessEnv {
+export function buildChildEnv(
+  base: NodeJS.ProcessEnv,
+  baseUrl: string,
+  serviceMode: "http" | "mock" = "http",
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(base))
     if (!SANITIZED_ENV_KEYS.includes(key) && !key.startsWith("NEXT_PUBLIC_SUPABASE"))
       env[key] = value;
   env.NODE_ENV = "development";
-  env.NEXT_PUBLIC_SERVICE_MODE = "http";
+  env.NEXT_PUBLIC_SERVICE_MODE = serviceMode;
   env.APP_URL = baseUrl;
   env.APP_SECRET = randomBytes(48).toString("hex");
   env.MAXBALL_VERIFY = "1";
@@ -396,6 +407,7 @@ async function startAppServer(
   parentEnv: NodeJS.ProcessEnv,
   logPath: string,
   forcedPort?: number,
+  serviceMode: "http" | "mock" = "http",
 ): Promise<{ child: ChildProcess; port: number; baseUrl: string }> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -409,7 +421,7 @@ async function startAppServer(
       {
         name: `next-dev-${port}`,
         cwd: staging,
-        env: buildChildEnv(parentEnv, baseUrl),
+        env: buildChildEnv(parentEnv, baseUrl, serviceMode),
         logPath,
       },
     );
@@ -491,6 +503,7 @@ async function runE2EPhase(
   parentEnv: NodeJS.ProcessEnv,
   workRoot: string,
   strict: boolean,
+  mode: "http" | "mock",
 ): Promise<PhaseResult> {
   if (!(await playwrightAvailable(repoRoot))) {
     return {
@@ -502,23 +515,36 @@ async function runE2EPhase(
     };
   }
   const staging = await createStaging(repoRoot, workRoot);
-  const logPath = path.join(workRoot, "e2e-server.log");
-  const server = await startAppServer(staging, tracker, parentEnv, logPath);
+  const logPath = path.join(workRoot, mode === "mock" ? "e2e-mock-server.log" : "e2e-server.log");
+  const server = await startAppServer(staging, tracker, parentEnv, logPath, undefined, mode);
   try {
+    // Mock mode proves the mockService needs no API; http mode runs the real
+    // backend projects (functional desktop + both extra viewports).
+    const projects =
+      mode === "mock"
+        ? ["--project=mock-mode"]
+        : ["--project=desktop-1280x720", "--project=mobile-390x844", "--project=narrow-320x780"];
     const child = tracker.spawn(
       path.join(repoRoot, "node_modules", ".bin", "playwright"),
-      ["test", "--config=playwright.config.ts"],
+      ["test", "--config=playwright.config.ts", ...projects],
       {
         name: "playwright",
         cwd: repoRoot,
-        env: { ...buildChildEnv(parentEnv, server.baseUrl), TEST_URL: server.baseUrl },
+        env: { ...buildChildEnv(parentEnv, server.baseUrl, mode), TEST_URL: server.baseUrl },
       },
     );
     const exit = await new Promise<number>((resolve) =>
       child.once("exit", (code) => resolve(code ?? 1)),
     );
     return exit === 0
-      ? { phase: "e2e", status: "PASS", detail: "Playwright browser suite passed" }
+      ? {
+          phase: "e2e",
+          status: "PASS",
+          detail:
+            mode === "mock"
+              ? "Playwright mock-mode suite passed (zero API traffic proven)"
+              : "Playwright browser suite passed",
+        }
       : {
           phase: "e2e",
           status: "FAIL",
@@ -674,7 +700,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   console.log(
-    `verify: adapter=${adapter.adapter} phases=${options.phases.join(",")} strict=${options.strict}`,
+    `verify: adapter=${adapter.adapter} mode=${options.mode} phases=${options.phases.join(",")} strict=${options.strict}`,
   );
   try {
     for (const phase of options.phases) {
@@ -683,7 +709,7 @@ export async function main(argv: string[]): Promise<number> {
         phase === "http"
           ? runHttpPhase(tracker, process.env, workRoot)
           : phase === "e2e"
-            ? runE2EPhase(tracker, process.env, workRoot, options.strict)
+            ? runE2EPhase(tracker, process.env, workRoot, options.strict, options.mode)
             : runRestartPhase(tracker, process.env, workRoot);
       // If the timeout wins the race, a late phase rejection must not crash Node.
       work.catch(() => {});
