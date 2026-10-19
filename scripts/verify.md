@@ -54,14 +54,15 @@ weakened; no forwarded-IP tricks are needed with this isolation.
 
 `MAXBALL_ADAPTER` selects the backend under test:
 
-- `dev-pglite` (default): the current baseline dev backend, isolated via the
-  staging copy.
-- `memory`: the genuine in-memory repository from issue #9.
+- `memory` (current default): the genuine in-memory repository from issue #9.
 - `sqlite`: the TypeORM/better-sqlite3 backend from issue #10; requires
   `MAXBALL_SQLITE_PATH` outside the repository, and the runner refuses
-  incomplete adapter configuration instead of silently falling back.
+  incomplete adapter configuration instead of silently falling back. The
+  restart-persistence phase runs against this adapter (CI exercises it with a
+  temp database).
 
-The final E2E acceptance run targets the default real SQLite mode.
+Both adapters pass the same behavioral suites (`npm test` runs the memory
+adapter; `npm run test:sqlite` re-runs them on the file store).
 
 ## Browser phase status
 

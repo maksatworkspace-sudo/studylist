@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Context } from "../src/server/context";
 import type { Store } from "../src/server/store/types";
+import { makeStore } from "./adapters";
 import { action } from "../src/server/actions";
 import { authAction } from "../src/server/auth";
 import { boot, detail, statistics } from "../src/server/queries";
@@ -22,8 +23,7 @@ let guest: Context,
   admin: Context,
   leader: Context;
 beforeAll(async () => {
-  const { MemoryStore } = await import("../src/server/store/memory");
-  db = new MemoryStore();
+  db = await makeStore();
   await seed(db);
   async function ctx(n?: number): Promise<Context> {
     const sessionHash = hash(randomUUID());

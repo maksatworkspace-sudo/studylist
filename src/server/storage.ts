@@ -1,8 +1,8 @@
 // Storage selection (issues #9/#10). The genuine in-memory repository is the
-// default backend for local/demo runs; the TypeORM + better-sqlite3 file
-// adapter (issue #10) registers itself here once available via
-// MAXBALL_ADAPTER=sqlite and MAXBALL_SQLITE_PATH. The historical PGlite
-// database at .local/postgres is no longer read or written.
+// current default backend; the TypeORM + better-sqlite3 file adapter is
+// selected with MAXBALL_ADAPTER=sqlite (+ MAXBALL_SQLITE_PATH, which must
+// live outside the repository). The historical PGlite database at
+// .local/postgres is no longer read or written.
 
 import type { Store } from "./store/types";
 import { MemoryStore } from "./store/memory";
@@ -28,11 +28,10 @@ export function store(): Promise<Store> {
 async function initialize(): Promise<Store> {
   const adapter = requestedAdapter();
   if (adapter === "sqlite") {
-    // The TypeORM + better-sqlite3 adapter lands with issue #10; until then
-    // requesting it is an explicit, loud failure rather than a fallback.
-    throw new Error(
-      "MAXBALL_ADAPTER=sqlite is not available yet (issue #10 delivers the TypeORM/better-sqlite3 store).",
-    );
+    const { openSqliteStore } = await import("./store/sqlite");
+    const target = await openSqliteStore();
+    await seed(target);
+    return target;
   }
   const memory = new MemoryStore();
   await seed(memory);

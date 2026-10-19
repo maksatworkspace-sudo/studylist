@@ -1,8 +1,8 @@
 // Repository semantics for the genuine in-memory backend (Refs #9): the
 // same behavioral contract the TypeORM/better-sqlite3 adapter must satisfy.
 import { describe, expect, it } from "vitest";
-import { MemoryStore } from "../src/server/store/memory";
 import { StoreError } from "../src/server/store/types";
+import { adapterName, makeStore } from "./adapters";
 
 const profile = (id: string) => ({
   id,
@@ -15,9 +15,9 @@ const profile = (id: string) => ({
   created_at: new Date().toISOString(),
 });
 
-describe("memory repository", () => {
+describe(`${adapterName()} repository`, () => {
   it("enforces primary-key and unique constraints", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("profiles", profile("p1"));
     await expect(repo.insert("profiles", profile("p1"))).rejects.toMatchObject({
       code: "unique",
@@ -33,7 +33,7 @@ describe("memory repository", () => {
   });
 
   it("rejects inserts referencing missing rows and cascades deletes", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("profiles", profile("p1"));
     await expect(
       repo.insert("feedback", {
@@ -106,7 +106,7 @@ describe("memory repository", () => {
   });
 
   it("detaches SET NULL references (attachments lose their session)", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("sessions", {
       token_hash: "s1",
       profile_id: null,
@@ -129,7 +129,7 @@ describe("memory repository", () => {
   });
 
   it("rolls transactions back completely on failure", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("profiles", profile("p1"));
     await expect(
       repo.transaction(async (tx) => {
@@ -142,7 +142,7 @@ describe("memory repository", () => {
   });
 
   it("never lets reads observe a partial transaction", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("profiles", profile("p1"));
     let observed = 0;
     const reader = (async () => {
@@ -164,7 +164,7 @@ describe("memory repository", () => {
   });
 
   it("hands out defensive copies", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("profiles", profile("p1"));
     const row = await repo.get("profiles", "p1");
     row!.email = "mutated@example.com";
@@ -175,7 +175,7 @@ describe("memory repository", () => {
   });
 
   it("numbers feedback from 1001 and past explicitly seeded numbers", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     expect(await repo.nextNumber()).toBe(1001);
     expect(await repo.nextNumber()).toBe(1002);
     await repo.insert("feedback", {
@@ -203,7 +203,7 @@ describe("memory repository", () => {
   });
 
   it("update merges patches and keeps uniqueness intact", async () => {
-    const repo = new MemoryStore();
+    const repo = await makeStore();
     await repo.insert("profiles", profile("p1"));
     await repo.insert("profiles", profile("p2"));
     await repo.update("profiles", "p1", { name: "Жаңа аты" });

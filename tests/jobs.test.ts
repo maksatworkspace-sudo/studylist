@@ -9,6 +9,7 @@ import {
 } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Store } from "../src/server/store/types";
+import { makeStore } from "./adapters";
 const state = vi.hoisted(() => ({
   db: null as Store | null,
   mail: vi.fn(),
@@ -28,8 +29,7 @@ import { runJobs } from "../src/server/jobs";
 import { encrypt } from "../src/server/security";
 let post: string;
 beforeAll(async () => {
-  const { MemoryStore } = await import("../src/server/store/memory");
-  state.db = new MemoryStore();
+  state.db = await makeStore();
 });
 beforeEach(async () => {
   await state.db!.deleteWhere("jobs", {});

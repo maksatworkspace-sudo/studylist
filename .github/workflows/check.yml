@@ -16,6 +16,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Behavioral parity: the same suites on the TypeORM/better-sqlite3 store.
+      - run: npm run test:sqlite
       # Contract gate (issue #6): openapi.yml has not landed yet, so this step
       # reports an explicit PENDING annotation instead of pretending to pass.
       # Once #6 lands, contract tests run as part of `npm test` above.
@@ -33,8 +35,11 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Isolated strict verification (http + browser)
         run: node scripts/verify.mts --phase http,e2e --strict
-      # The restart-persistence phase activates with the #10 SQLite adapter:
-      #   - run: node scripts/verify.mts --phase restart --strict
+      # Restart persistence against the file adapter, isolated temp database.
+      - name: Isolated restart-persistence verification (sqlite)
+        run: >
+          MAXBALL_ADAPTER=sqlite MAXBALL_SQLITE_PATH="$RUNNER_TEMP/maxball-verify.sqlite"
+          node scripts/verify.mts --phase restart --strict
       - name: Isolated mock-mode browser verification (#5 zero API traffic)
         run: node scripts/verify.mts --phase e2e --mode mock --strict
       - name: Upload verification artifacts
