@@ -17,7 +17,7 @@ export async function POST(request: Request) {
     const name = input.action;
     if (typeof name !== "string") throw new AppError("Әрекет атауы қажет.");
     const ctx = await context(request);
-    await rateLimit(ctx.db, `request:${ctx.ip}`, 180, 60);
+    await rateLimit(ctx.store, `request:${ctx.ip}`, 180, 60);
     if (name === "runJobs") {
       requireManager(ctx);
       return respond(ctx, { ok: true, results: await runJobs() });
