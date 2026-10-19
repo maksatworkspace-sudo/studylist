@@ -5,6 +5,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v7.1.0
@@ -15,3 +16,31 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Contract gate (issue #6): openapi.yml has not landed yet, so this step
+      # reports an explicit PENDING annotation instead of pretending to pass.
+      # Once #6 lands, contract tests run as part of `npm test` above.
+      - name: Contract validation gate
+        run: |
+          if [ -f openapi.yml ]; then
+            echo "openapi.yml present — contract coverage runs in the npm test step."
+          else
+            echo "::warning title=contract-pending::openapi.yml not delivered yet (issue #6 open) — contract validation is PENDING, not passed."
+          fi
+      # Isolated runner (issue #19): real app on a free loopback port with a
+      # throwaway data directory; HTTP + restart phases run now. The browser
+      # phase stays explicitly PENDING until @playwright/test dependency
+      # ownership transfers; then activate the strict form below.
+      - name: Isolated HTTP and restart verification
+        run: node scripts/verify.mts --phase http,restart
+      # Activation once @playwright/test is a devDependency:
+      #   - run: npx playwright install --with-deps chromium
+      #   - run: node scripts/verify.mts --strict
+      - name: Upload verification artifacts
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: verify-artifacts
+          if-no-files-found: ignore
+          path: |
+            test-results/
+            playwright-report/
