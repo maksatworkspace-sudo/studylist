@@ -225,9 +225,12 @@ export default function Maxball() {
     workspace.current?.scrollTo({ top: 0 });
     window.scrollTo({ top: 0 });
   }
-  const posts = useMemo(() => {
-    const query = search.toLocaleLowerCase("kk").trim();
-    let result =
+  // Page scope decides which posts belong to the current tab (my records,
+  // saved, moderation queue or the whole public feed). Every count on the
+  // page — the overview strip, the type tabs and the list itself — derives
+  // from this set, so numbers never describe posts outside the page.
+  const scopePosts = useMemo(
+    () =>
       data?.posts.filter((p) =>
         page === "mine"
           ? p.isOwner
@@ -236,7 +239,12 @@ export default function Maxball() {
             : page === "moderation"
               ? p.hidden || p.flagged
               : !p.hidden,
-      ) || [];
+      ) || [],
+    [data, page],
+  );
+  const posts = useMemo(() => {
+    const query = search.toLocaleLowerCase("kk").trim();
+    let result = scopePosts;
     if (query)
       result = result.filter((p) =>
         [p.title, p.body, p.course, p.teacher, p.customTarget, `#${p.number}`]
@@ -256,7 +264,7 @@ export default function Maxball() {
           ? b.comments - a.comments
           : new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
     );
-  }, [data, page, search, type, status, course, teacherFilter, sort]);
+  }, [scopePosts, search, type, status, course, teacherFilter, sort]);
   if (!data)
     return (
       <div className="initial">
@@ -500,7 +508,7 @@ export default function Maxball() {
                       <MessageCircle size={19} />
                     </span>
                     <span>
-                      <strong>{publicPosts.length}</strong>
+                      <strong>{scopePosts.length}</strong>
                       <small>Барлық жазба</small>
                     </span>
                   </div>
@@ -511,7 +519,7 @@ export default function Maxball() {
                     <span>
                       <strong>
                         {
-                          publicPosts.filter((p) => p.status === "resolved")
+                          scopePosts.filter((p) => p.status === "resolved")
                             .length
                         }
                       </strong>
@@ -525,7 +533,7 @@ export default function Maxball() {
                     <span>
                       <strong>
                         {
-                          publicPosts.filter(
+                          scopePosts.filter(
                             (p) =>
                               p.status === "reviewing" ||
                               p.status === "in_progress",
@@ -554,10 +562,8 @@ export default function Maxball() {
                               : typeLabels[t as FeedbackType]}
                             <span>
                               {t === "all"
-                                ? data.posts.filter((p) => !p.hidden).length
-                                : data.posts.filter(
-                                    (p) => p.type === t && !p.hidden,
-                                  ).length}
+                                ? scopePosts.length
+                                : scopePosts.filter((p) => p.type === t).length}
                             </span>
                           </button>
                         ))}
