@@ -44,3 +44,8 @@ The orchestrator has not issued a QA PASS or closed #21, #22 or #24 on its behal
 See [earlier independent evidence](ux-motion-2026-10-20.md) for RED runs and the
 independent browser-capability limitation. No live-provider, deployment, wider
 MVP or production-readiness acceptance is claimed by this scoped record.
+
+Subsequent independent QA completed the missing explicit assertions in `8884300`
+and verified green run 39357459459. Its superseding [per-AC verdict](ux-motion-independent-acceptance.md)
+accepts #21/#22/#24; the pending paragraph above describes this original parent
+record's historical status, not the later independent verdict.
