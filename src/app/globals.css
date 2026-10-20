@@ -600,6 +600,18 @@ progress::-moz-progress-bar {
   background: #fff;
   width: 39px;
   height: 39px;
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    background 0.15s,
+    box-shadow 0.15s;
+}
+/* The panel state must be visible on the button itself, not only below it. */
+.filter-button.active {
+  border-color: #88a9ed;
+  color: var(--blue);
+  background: #f0f4fc;
+  box-shadow: 0 0 0 2px #2762e70a;
 }
 .filter-row {
   display: flex;
@@ -646,12 +658,14 @@ progress::-moz-progress-bar {
   padding: 19px 21px 0;
   transition:
     border-color 0.15s,
-    box-shadow 0.15s;
+    box-shadow 0.15s,
+    transform 0.15s;
   overflow: hidden;
 }
 .post-card:hover {
   border-color: #bfd0ef;
   box-shadow: 0 3px 10px #173e7e04;
+  transform: translateY(-1px);
 }
 .post-card-meta {
   display: flex;
@@ -661,8 +675,16 @@ progress::-moz-progress-bar {
   margin-bottom: 11px;
 }
 .post-card-meta > small {
+  flex-shrink: 0;
   font-size: 9px;
-  color: #b0b7c3;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #7f899b;
+  background: #f4f6fa;
+  border: 1px solid #e4e9f1;
+  border-radius: 5px;
+  padding: 3px 7px;
 }
 .post-tags {
   display: flex;
@@ -785,7 +807,7 @@ progress::-moz-progress-bar {
   display: flex;
   gap: 7px;
   align-items: center;
-  color: #8f98a7;
+  color: #7f899b;
   font-size: 10px;
   min-width: 0;
   flex-wrap: wrap;
@@ -804,8 +826,9 @@ progress::-moz-progress-bar {
   font-size: 9px;
 }
 .anonymous {
-  background: #f0f2f6;
-  color: #9aa4b4;
+  background: #eceff5;
+  color: #6f7a8c;
+  border: 1px solid #dfe4ec;
 }
 .post-controls {
   display: flex;
@@ -819,16 +842,23 @@ progress::-moz-progress-bar {
   gap: 4px;
   min-height: 25px;
   min-width: 24px;
-  padding: 2px;
+  padding: 4px 7px;
+  border-radius: 6px;
   font-size: 10px;
-  color: #a3adbd;
+  font-weight: 500;
+  color: #7f899b;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
 .post-controls button.supported,
 .post-controls button.saved {
   color: var(--blue);
+  background: #f0f4fc;
 }
 .post-controls button:hover {
   color: var(--blue);
+  background: #f0f4fc;
 }
 .feed-aside {
   border-left: 1px solid #e5e9f0;
@@ -1001,6 +1031,12 @@ progress::-moz-progress-bar {
   font-size: 14px;
   font-weight: 500;
   color: #8e9baf;
+}
+.empty .empty-hint {
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 320px;
+  color: #9aa7bb;
 }
 .empty .text-btn {
   margin-top: 4px;

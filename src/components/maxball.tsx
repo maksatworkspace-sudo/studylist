@@ -690,9 +690,23 @@ export default function Maxball() {
                         title={
                           page === "moderation"
                             ? "Тексеруді күтетін жазба жоқ"
-                            : "Жазба табылмады"
+                            : page === "mine" && data.viewer
+                              ? "Сіз әлі жазба қалдырмағансыз"
+                              : page === "mine"
+                                ? "Бұл браузерде жазба табылмады"
+                                : page === "saved"
+                                  ? "Сақталған жазба жоқ"
+                                  : "Жазба табылмады"
                         }
                       >
+                        {page === "mine" && data.viewer && (
+                          <button
+                            className="btn primary"
+                            onClick={() => setCompose(true)}
+                          >
+                            Бірінші жазбаны қалдыру
+                          </button>
+                        )}
                         {page === "mine" && !data.viewer && (
                           <button
                             className="text-btn"
@@ -700,6 +714,12 @@ export default function Maxball() {
                           >
                             Құпия кодпен табу
                           </button>
+                        )}
+                        {page === "saved" && (
+                          <span className="empty-hint">
+                            Жазба карточкасындағы сақтау белгішесін басып,
+                            кейін оқу үшін сақтаңыз.
+                          </span>
                         )}
                         <button
                           className="text-btn"
