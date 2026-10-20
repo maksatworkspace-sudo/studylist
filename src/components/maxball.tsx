@@ -57,7 +57,7 @@ import {
   Receipt,
   Track,
 } from "./forms";
-import { Dialog, Empty, StatusBadge, Tag } from "./ui";
+import { Dialog, Empty, StatusBadge, Tag, Presence, Reveal, Notice, SessionFeedback, type AuthFeedback } from "./ui";
 import PostDetail from "./post-detail";
 
 type Page =
@@ -109,6 +109,17 @@ export default function Maxball() {
     item: { id: string; name: string; active: boolean; subject?: string };
   } | null>(null);
   const [toastText, setToastText] = useState("");
+  const [toastId, setToastId] = useState(0);
+  const toastRef = useRef("");
+  const toastReplacement = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionUnknown, setSessionUnknown] = useState(false);
+  const sessionLock = useRef(false);
+  const requestVersion = useRef(0);
+  const [feedback, setFeedback] = useState<AuthFeedback | null>(null);
+  const feedbackTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pendingCommands = useRef(new Set<string>());
+  const [pending, setPending] = useState<Set<string>>(new Set());
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
@@ -118,16 +129,73 @@ export default function Maxball() {
   const [to, setTo] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const toast = useCallback((text: string) => {
-    setToastText(text);
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToastText(""), 5000);
+    clearTimeout(toastReplacement.current);
+    const replace = !!toastRef.current;
+    toastRef.current = text;
+    setToastText("");
+    const show = () => {
+      setToastText(text);
+      setToastId((id) => id + 1);
+      toastTimer.current = setTimeout(() => { toastRef.current = ""; setToastText(""); }, 5000);
+    };
+    if (replace && !window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+      toastReplacement.current = setTimeout(show, 280);
+    else show();
   }, []);
+  function dismissToast() {
+    clearTimeout(toastTimer.current); clearTimeout(toastReplacement.current);
+    toastRef.current = ""; setToastText("");
+  }
   const reload = useCallback(async () => {
+    const version = ++requestVersion.current;
     const params = new URLSearchParams();
     if (from) params.set("from", from);
     if (to) params.set("to", to);
-    setData(await read<Boot>(`/api/state?${params}`));
+    const next = await read<Boot>(`/api/state?${params}`);
+    if (version === requestVersion.current) setData(next);
   }, [from, to]);
+  useEffect(() => () => {
+    clearTimeout(toastTimer.current);
+    clearTimeout(toastReplacement.current);
+    clearTimeout(feedbackTimer.current);
+    ++requestVersion.current;
+  }, []);
+  function resetFilters() {
+    setSearch(""); setType("all"); setStatus("all"); setCourse("");
+    setTeacherFilter(""); setSort("new"); setLimit(8); setFilters(false);
+  }
+  function authPending(busy: boolean) {
+    sessionLock.current = busy;
+    setSessionBusy(busy);
+    if (busy) {
+      ++requestVersion.current;
+      closePost(); setCompose(false); setRating(null); setReview(null);
+      setManage(null); setCatalogEdit(null); setTrack(false);
+    }
+  }
+  async function finishAuth(kind?: "login" | "register" | "demo" | "logout") {
+    // Once a session mutation succeeds, old account data is unsafe until refetched.
+    setSessionUnknown(true);
+    const version = ++requestVersion.current;
+    const next = await read<Boot>("/api/state");
+    if (version !== requestVersion.current) return;
+    setData(next);
+    setSessionUnknown(false);
+    if (kind) {
+      resetFilters(); setFrom(""); setTo(""); setPage("feed"); setMenu(false);
+      clearTimeout(feedbackTimer.current);
+      setFeedback({ id: Date.now(), kind: kind === "logout" ? "farewell" : kind === "register" ? "register" : "welcome", name: next.viewer?.name || "Email-ды растаңыз" });
+      feedbackTimer.current = setTimeout(() => setFeedback(null), 600);
+    }
+  }
+  async function logout() {
+    if (sessionLock.current) return;
+    authPending(true);
+    try { await send("logout"); await finishAuth("logout"); }
+    catch (error) { toast((error as Error).message); }
+    finally { authPending(false); }
+  }
   useEffect(() => {
     if (started.current) return;
     started.current = true;
@@ -202,11 +270,18 @@ export default function Maxball() {
     history.replaceState(null, "", url);
   }
   async function quick(name: string, input: Record<string, unknown> = {}) {
+    const key = String(input.id || name);
+    if (sessionLock.current || pendingCommands.current.has(key)) return;
+    pendingCommands.current.add(key);
+    setPending(new Set(pendingCommands.current));
     try {
       await send(name, input);
-      await reload();
+      if (!sessionLock.current) await reload();
     } catch (e) {
       toast((e as Error).message);
+    } finally {
+      pendingCommands.current.delete(key);
+      setPending(new Set(pendingCommands.current));
     }
   }
   function authGate(action: () => void) {
@@ -219,21 +294,17 @@ export default function Maxball() {
       return;
     }
     setPage(next);
-    setSearch("");
-    setLimit(8);
+    resetFilters();
     setMenu(false);
     workspace.current?.scrollTo({ top: 0 });
     window.scrollTo({ top: 0 });
   }
-  // Page scope decides which posts belong to the current tab (my records,
-  // saved, moderation queue or the whole public feed). Every count on the
-  // page — the overview strip, the type tabs and the list itself — derives
-  // from this set, so numbers never describe posts outside the page.
+  // Ownership/visibility is applied before the shared search/filter result.
   const scopePosts = useMemo(
     () =>
       data?.posts.filter((p) =>
         page === "mine"
-          ? p.isOwner
+          ? data?.viewer ? p.isAccountOwner : p.isOwner
           : page === "saved"
             ? p.saved
             : page === "moderation"
@@ -295,7 +366,7 @@ export default function Maxball() {
   return (
     <>
       <div className="app-backdrop" />
-      <div className="app-shell">
+      <div className={`app-shell ${sessionBusy || sessionUnknown ? "session-pending" : ""}`} inert={sessionBusy || sessionUnknown}>
         <header className="topbar">
           <button
             className="icon-btn mobile-only"
@@ -435,9 +506,9 @@ export default function Maxball() {
                 <ChevronRight size={16} />
               </button>
               {data.viewer && (
-                <button className="logout" onClick={() => quick("logout")}>
-                  <LogOut size={16} />
-                  Шығу
+                <button className="logout" disabled={sessionBusy} onClick={() => void logout()}>
+                  {sessionBusy ? <LoaderCircle className="spin" size={16} /> : <LogOut size={16} />}
+                  {sessionBusy ? "Шығуда…" : "Шығу"}
                 </button>
               )}
               <span className="sidebar-copyright">
@@ -446,6 +517,7 @@ export default function Maxball() {
             </div>
           </aside>
           <main className="workspace" ref={workspace}>
+            <div className="page-content" key={`${page}:${data.viewer?.id || "guest"}`}>
             <div className="page-header">
               <div className="breadcrumb">
                 MAXBALL EDTECH <ChevronRight size={13} />
@@ -508,7 +580,7 @@ export default function Maxball() {
                       <MessageCircle size={19} />
                     </span>
                     <span>
-                      <strong>{scopePosts.length}</strong>
+                      <strong>{posts.length}</strong>
                       <small>Барлық жазба</small>
                     </span>
                   </div>
@@ -519,7 +591,7 @@ export default function Maxball() {
                     <span>
                       <strong>
                         {
-                          scopePosts.filter((p) => p.status === "resolved")
+                          posts.filter((p) => p.status === "resolved")
                             .length
                         }
                       </strong>
@@ -533,7 +605,7 @@ export default function Maxball() {
                     <span>
                       <strong>
                         {
-                          scopePosts.filter(
+                          posts.filter(
                             (p) =>
                               p.status === "reviewing" ||
                               p.status === "in_progress",
@@ -562,8 +634,8 @@ export default function Maxball() {
                               : typeLabels[t as FeedbackType]}
                             <span>
                               {t === "all"
-                                ? scopePosts.length
-                                : scopePosts.filter((p) => p.type === t).length}
+                                ? posts.length
+                                : posts.filter((p) => p.type === t).length}
                             </span>
                           </button>
                         ))}
@@ -600,12 +672,12 @@ export default function Maxball() {
                           <SlidersHorizontal size={18} />
                         </button>
                       </div>
-                      {filters && (
-                        <div className="filter-row">
+                      <Presence show={filters}>
+                        <Reveal className="filter-row">
                           <select
                             aria-label="Курс бойынша сүзгі"
                             value={course}
-                            onChange={(e) => setCourse(e.target.value)}
+                            onChange={(e) => { setCourse(e.target.value); setLimit(8); }}
                           >
                             <option value="">Барлық курс</option>
                             {data.courses.map((c) => (
@@ -617,7 +689,7 @@ export default function Maxball() {
                           <select
                             aria-label="Оқытушы бойынша сүзгі"
                             value={teacherFilter}
-                            onChange={(e) => setTeacherFilter(e.target.value)}
+                            onChange={(e) => { setTeacherFilter(e.target.value); setLimit(8); }}
                           >
                             <option value="">Барлық оқытушы</option>
                             {data.teachers.map((t) => (
@@ -629,7 +701,7 @@ export default function Maxball() {
                           <select
                             aria-label="Мәртебе бойынша сүзгі"
                             value={status}
-                            onChange={(e) => setStatus(e.target.value)}
+                            onChange={(e) => { setStatus(e.target.value); setLimit(8); }}
                           >
                             <option value="all">Барлық мәртебе</option>
                             {Object.entries(statusLabels).map(([s, l]) => (
@@ -644,14 +716,16 @@ export default function Maxball() {
                               setStatus("all");
                               setCourse("");
                               setTeacherFilter("");
+                              setSearch(""); setType("all"); setLimit(8);
                             }}
                           >
                             Тазарту
                           </button>
-                        </div>
-                      )}
+                        </Reveal>
+                      </Presence>
+                      {!filters && (search || type !== "all" || course || teacherFilter || status !== "all") && <button className="text-btn clear-filters" onClick={resetFilters}><X size={13} /> Сүзгілерді тазарту</button>}
                       <div className="list-meta">
-                        <span>{posts.length} жазба</span>
+                        <span role="status">{posts.length} жазба</span>
                         <label>
                           <ArrowDownWideNarrow size={14} />
                           <select
@@ -671,6 +745,7 @@ export default function Maxball() {
                         <PostCard
                           key={p.id}
                           post={p}
+                          busy={pending.has(p.id)}
                           onOpen={() => openPost(p.id)}
                           onSupport={() =>
                             authGate(
@@ -693,7 +768,7 @@ export default function Maxball() {
                             : page === "mine" && data.viewer
                               ? "Сіз әлі жазба қалдырмағансыз"
                               : page === "mine"
-                                ? "Бұл браузерде жазба табылмады"
+                                ? "Кодпен ашылған жазба жоқ"
                                 : page === "saved"
                                   ? "Сақталған жазба жоқ"
                                   : "Жазба табылмады"
@@ -1319,14 +1394,20 @@ export default function Maxball() {
                 )}
               </section>
             )}
+            </div>
           </main>
         </div>
       </div>
+      {(sessionBusy || sessionUnknown) && <div className="session-loading" role="status">
+        <img src="/maxball-logo.png" alt="" />
+        {sessionBusy ? <><LoaderCircle size={20} className="spin" /><strong>Аккаунт жаңартылуда…</strong></> : <><strong>Аккаунт деректерін жаңарту қажет</strong><button className="btn primary" onClick={() => { authPending(true); void finishAuth().catch((e) => toast(e.message)).finally(() => authPending(false)); }}>Қайта көру</button></>}
+        <div className="session-skeleton" aria-hidden="true"><i /><i /><i /></div>
+      </div>}
       <div className="outside-footer">
         <ShieldCheck size={14} />
         MAXBALL EDTECH<span>Бірге дамимыз.</span>
       </div>
-      {compose && (
+      <Presence show={compose}>{compose && (
         <Compose
           data={data}
           onClose={() => setCompose(false)}
@@ -1337,17 +1418,18 @@ export default function Maxball() {
             void reload().catch((e) => toast(e.message));
           }}
         />
-      )}
-      {catalogEdit && (
+      )}</Presence>
+      <Presence show={!!catalogEdit}>{catalogEdit && (
         <CatalogEdit
           item={catalogEdit.item}
           kind={catalogEdit.kind}
           onClose={() => setCatalogEdit(null)}
           onDone={reload}
         />
-      )}
-      {auth && (
+      )}</Presence>
+      <Presence show={!!auth}>{auth && (
         <Auth
+          key={auth}
           initial={auth}
           proof={authProof}
           viewer={data.viewer}
@@ -1355,10 +1437,11 @@ export default function Maxball() {
             setAuth(null);
             setAuthProof(undefined);
           }}
-          onDone={reload}
+          onDone={finishAuth}
+          onPending={authPending}
         />
-      )}
-      {track && (
+      )}</Presence>
+      <Presence show={track}>{track && (
         <Track
           onClose={() => setTrack(false)}
           onOpen={(id) => {
@@ -1367,18 +1450,20 @@ export default function Maxball() {
           }}
           onReceipt={setReceipt}
         />
-      )}
-      {receipt && (
+      )}</Presence>
+      <Presence show={!!receipt}>{receipt && (
         <Receipt
           result={receipt}
           onClose={() => {
             setReceipt(null);
             if (receipt.id) openPost(receipt.id);
           }}
+          onUnlock={() => { setReceipt(null); setTrack(true); }}
         />
-      )}
-      {detailId && !auth && !receipt && (
+      )}</Presence>
+      <Presence immediate={sessionBusy || sessionUnknown} show={!!detailId && !auth && !receipt && !sessionBusy && !sessionUnknown}>{detailId && !auth && !receipt && !sessionBusy && !sessionUnknown && (
         <PostDetail
+          key={`${detailId}:${data.viewer?.id || "guest"}`}
           id={detailId}
           data={data}
           onClose={closePost}
@@ -1386,15 +1471,15 @@ export default function Maxball() {
           onAuth={() => setAuth("login")}
           toast={toast}
         />
-      )}
-      {rating && (
+      )}</Presence>
+      <Presence show={!!rating}>{rating && (
         <Rating
           teacher={rating}
           onClose={() => setRating(null)}
           onDone={reload}
         />
-      )}
-      {review && (
+      )}</Presence>
+      <Presence show={!!review}>{review && (
         <Dialog
           title={`${review.name} · пікірлер`}
           onClose={() => setReview(null)}
@@ -1431,22 +1516,16 @@ export default function Maxball() {
             Бағалау
           </button>
         </Dialog>
-      )}
-      {manage && (
+      )}</Presence>
+      <Presence show={!!manage}>{manage && (
         <ManageForm
           kind={manage}
           onClose={() => setManage(null)}
           onDone={reload}
         />
-      )}
-      {toastText && (
-        <div className="toast" role="status">
-          <span>{toastText}</span>
-          <button aria-label="Хабарды жабу" onClick={() => setToastText("")}>
-            <X size={16} />
-          </button>
-        </div>
-      )}
+      )}</Presence>
+      <Presence show={!!toastText}>{toastText && <Notice key={toastId} text={toastText} onClose={dismissToast} />}</Presence>
+      <Presence show={!!feedback}>{feedback && <SessionFeedback key={feedback.id} feedback={feedback} />}</Presence>
     </>
   );
 }
@@ -1455,14 +1534,16 @@ function PostCard({
   onOpen,
   onSupport,
   onSave,
+  busy,
 }: {
   post: Post;
   onOpen: () => void;
   onSupport: () => void;
   onSave: () => void;
+  busy: boolean;
 }) {
   return (
-    <article className={`post-card ${p.hidden ? "hidden-post" : ""}`}>
+    <article className={`post-card ${p.hidden ? "hidden-post" : ""}`} aria-busy={busy}>
       <div className="post-card-meta">
         <div className="post-tags">
           <Tag post={p} />
@@ -1506,10 +1587,12 @@ function PostCard({
           <button
             className={p.supported ? "supported" : ""}
             onClick={onSupport}
+            disabled={busy}
+            aria-pressed={p.supported}
             aria-label={`Қолдау: ${p.supports}`}
             title="Қолдау"
           >
-            <ArrowUp size={15} />
+            {busy ? <LoaderCircle size={15} className="spin" /> : <ArrowUp size={15} />}
             <span>{p.supports}</span>
           </button>
           <button
@@ -1523,6 +1606,8 @@ function PostCard({
           <button
             className={p.saved ? "saved" : ""}
             onClick={onSave}
+            disabled={busy}
+            aria-pressed={p.saved}
             title="Сақтау"
             aria-label="Сақтау"
           >

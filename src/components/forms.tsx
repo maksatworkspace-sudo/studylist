@@ -299,9 +299,11 @@ export function Compose({
 export function Receipt({
   result,
   onClose,
+  onUnlock,
 }: {
   result: Result;
   onClose: () => void;
+  onUnlock?: () => void;
 }) {
   return (
     <Dialog title="Жазбаңыз жарияланды" onClose={onClose}>
@@ -317,9 +319,10 @@ export function Receipt({
           Жазбаны басқару үшін өтініш нөмірі мен осы код қажет. Код пен қалпына
           келтіру email-ы болмаса, қолжетімділік қайтарылмайды.
         </p>
-        <button className="btn primary" onClick={onClose}>
-          Түсінікті
+        <button className="btn primary" onClick={onUnlock || onClose}>
+          <KeyRound size={17} /> Кодпен ашу
         </button>
+        <button className="text-btn" onClick={onClose}>Түсінікті</button>
       </div>
     </Dialog>
   );
@@ -331,16 +334,29 @@ export function Auth({
   viewer,
   onClose,
   onDone,
+  onPending,
 }: {
   initial?: string;
   proof?: string;
   viewer: Boot["viewer"];
   onClose: () => void;
-  onDone: () => Promise<void>;
+  onDone: (kind?: "login" | "register" | "demo") => Promise<void>;
+  onPending: (pending: boolean) => void;
 }) {
   const [mode, setMode] = useState(initial);
   const [message, setMessage] = useState("");
   const [local, setLocal] = useState<Result | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmationError, setConfirmationError] = useState("");
+  const locked = useRef(false);
+  async function perform(action: string, input: Record<string, unknown>, done: (result: Result) => Promise<void>) {
+    if (locked.current) return;
+    locked.current = true;
+    setBusy(true);
+    onPending(true);
+    try { await done(await send(action, input)); }
+    finally { locked.current = false; setBusy(false); onPending(false); }
+  }
   const titles: Record<string, string> = {
     login: "Қайта қош келдіңіз!",
     register: "Аккаунт ашу",
@@ -350,9 +366,10 @@ export function Auth({
     verify: "Email растауын қайта жіберу",
   };
   return (
-    <Dialog title={titles[mode] || "Аккаунт"} onClose={onClose}>
+    <Dialog title={titles[mode] || "Аккаунт"} onClose={() => { if (!locked.current) onClose(); }}>
       <Form
         key={mode}
+        disabled={busy}
         submit={
           mode === "login"
             ? "Кіру"
@@ -373,22 +390,25 @@ export function Auth({
             profile: "updateProfile",
             verify: "resendConfirmation",
           }[mode]!;
-          const result = await send(action, {
+          await perform(action, {
             ...Object.fromEntries(f),
             token: proof || local?.localToken,
-          });
+          }, async (result) => {
           if (result.localToken) {
             setLocal(result);
             setMessage(result.message || "");
             if (result.tokenPurpose === "password") setMode("reset");
+            if (mode === "register") await onDone("register");
             return;
           }
           if (mode === "forgot" || mode === "register" || mode === "verify") {
             setMessage(result.message || "Хат жіберілді.");
+            if (mode === "register") await onDone("register");
             return;
           }
-          await onDone();
+          await onDone(mode === "login" ? "login" : undefined);
           onClose();
+          });
         }}
       >
         {(mode === "register" || mode === "profile") && (
@@ -455,13 +475,16 @@ export function Auth({
           <button
             type="button"
             className="btn secondary"
+            disabled={busy}
             onClick={async () => {
               try {
-                await send("confirmEmail", { token: local.localToken });
-                await onDone();
-                onClose();
+                setConfirmationError("");
+                await perform("confirmEmail", { token: local.localToken }, async () => {
+                  await onDone("register");
+                  onClose();
+                });
               } catch (e) {
-                setMessage((e as Error).message);
+                setConfirmationError((e as Error).message);
               }
             }}
           >
@@ -470,8 +493,9 @@ export function Auth({
           </button>
         )}
       </Form>
+      {confirmationError && <p className="error" role="alert">{confirmationError}</p>}
       {mode === "login" && (
-        <div className="auth-links">
+        <div className="auth-links" inert={busy}>
           <button
             onClick={() => {
               setMode("verify");
@@ -497,6 +521,7 @@ export function Auth({
       {(mode === "register" || mode === "forgot" || mode === "verify") && (
         <button
           className="text-btn auth-back"
+          disabled={busy}
           onClick={() => {
             setMode("login");
             setMessage("");

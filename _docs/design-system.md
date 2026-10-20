@@ -65,6 +65,41 @@ Brand/design changes beyond these references need a groomed issue, not accidenta
 drift hidden in a persistence or contract change. Runtime and privacy correctness
 still take precedence over visual similarity to a reference.
 
+## Motion And Session Feedback (#24)
+
+- Shared CSS tokens use 350ms entry, 280ms exit and
+  `cubic-bezier(0.22, 1, 0.36, 1)`. Controls respond in 180ms. Page and feed entry
+  uses 7-8px translation; new feed cards stagger by 25ms, capped at 100ms. Stable
+  post keys and a page/viewer boundary keep typing and local drafts intact.
+- Successful auth refreshes the server-authorized viewer before showing a
+  branded logo/name/check welcome or distinct farewell. The nonblocking panel
+  begins exit after 600ms (880ms including exit). Profile saves, failures and
+  pending requests never produce welcome feedback. No artificial network delay.
+- In-flight auth disables the workspace and conceals old account-sensitive
+  content. A failed session refresh keeps it concealed with explicit retry;
+  failed logout retains the viewer and announces the error. Request versions
+  discard older boot/detail responses. Conflicting post mutations and form
+  submissions are locked until their confirmed refresh; failures preserve input.
+- Native modal dialogs keep focus containment, Escape/backdrop dismissal and
+  restoration. Presence retains their subtree for exit with the dialog inert;
+  rapid reopening cancels exit without resetting inputs. Private detail exits
+  are immediate at a session boundary. Replacement dialogs own focus.
+- Toasts enter and exit, with a once-only status announcement, information icon
+  and 5-second progress line. Replacement waits for the outgoing exit and only
+  the latest queued notice appears. All timers clean up on unmount.
+- Reduced motion disables animations/transitions, staggering and hover movement;
+  exit retention becomes immediate. Text, static icons, focus and pending/error
+  states remain. Only actual pending spinners loop in normal-motion mode; there
+  is no decorative infinite animation or new motion dependency.
+- Page navigation resets search/type/status/course/teacher/sort. Overview,
+  type badges and result count all describe the final filtered set (#21), not
+  global or silently faceted counts. Account My Messages uses registered
+  ownership; guest edit access still requires explicit server code unlock (#22).
+
+These are implementation rules, not independent QA acceptance. QA must execute
+the normal/reduced-motion, keyboard, failure/race and three-viewport cases in
+the canonical #21/#22/#24 issues against the pushed implementation.
+
 ## Motion Addendum
 
 The [2026-10-20 motion and ownership addendum](ux-motion-2026-10-20.md) records

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   Bookmark,
@@ -48,18 +48,29 @@ export default function PostDetail({
   const [replyTo, setReplyTo] = useState<Comment | null>(null);
   const [moderate, setModerate] = useState(false);
   const [busy, setBusy] = useState(false);
-  const load = async () =>
-    setDetail(await read<Detail>(`/api/state?post=${id}`));
+  const locked = useRef(false);
+  const request = useRef(0);
+  const load = useCallback(async () => {
+    const version = ++request.current;
+    const next = await read<Detail>(`/api/state?post=${id}`);
+    if (version === request.current) { setDetail(next); setError(""); }
+  }, [id]);
   useEffect(() => {
-    void load().catch((e) => setError(e.message));
-  }, [id, data.viewer?.id]); // A new identity must fetch a fresh, authorized detail.
+    let active = true;
+    setDetail(null);
+    void load().catch((e) => { if (active) setError(e.message); });
+    return () => { active = false; ++request.current; };
+  }, [load, data.viewer?.id]);
   async function mutate(name: string, values: Record<string, unknown> = {}) {
+    if (locked.current) return;
+    locked.current = true;
     setBusy(true);
     try {
       await send(name, { id, ...values });
       await load();
       await onChanged();
     } finally {
+      locked.current = false;
       setBusy(false);
     }
   }
@@ -187,15 +198,18 @@ export default function PostDetail({
           <button
             className={`btn secondary ${p.supported ? "active" : ""}`}
             disabled={busy}
+            aria-pressed={p.supported}
             onClick={() => requireAuth(() => void command("toggleSupport"))}
           >
-            <ArrowUp size={17} />
+            {busy ? <LoaderCircle size={17} className="spin" /> : <ArrowUp size={17} />}
             {p.supports} Қолдау
           </button>
           <button
             className={`icon-btn ${p.saved ? "active" : ""}`}
             title="Сақтау"
             aria-label="Сақтау"
+            aria-pressed={p.saved}
+            disabled={busy}
             onClick={() => requireAuth(() => void command("toggleBookmark"))}
           >
             <Bookmark size={18} fill={p.saved ? "currentColor" : "none"} />
