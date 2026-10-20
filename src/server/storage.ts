@@ -20,11 +20,13 @@ export function requestedAdapter(): Adapter {
   return "sqlite";
 }
 
-const globals = globalThis as unknown as { maxballStore?: Promise<Store> };
+// Schema changes need a new cache key: HMR may retain v1 TypeORM metadata.
+// Leave the old promise/connection alive for in-flight requests; never reuse it.
+const globals = globalThis as unknown as { maxballStoreV2?: Promise<Store> };
 
 /** Lazily created singleton store for the running process. */
 export function store(): Promise<Store> {
-  return (globals.maxballStore ??= initialize());
+  return (globals.maxballStoreV2 ??= initialize());
 }
 
 async function initialize(): Promise<Store> {

@@ -32,13 +32,18 @@ rotates the code and revokes every grant; it does not grant access automatically
 
 ## Running Processes
 
-Start/restart a server using the upgraded code to initialize migration v2 and
-new ORM metadata. Development hot reload can retain an older global store;
-missing proof fails closed, but a full restart is needed for unlock to work
-through the upgraded entity metadata. Do not continue serving requests from
-old-code processes. A new preview on another port does not patch an old process.
-The coordinating agent owns preview lifecycle; this change does not stop or
-modify the user's port-3000 process or database. No deployment is performed.
+The global cache key is versioned as `maxballStoreV2`. Development hot reload
+does not reuse the previous `maxballStore` promise with v1 TypeORM metadata.
+The new initializer runs migration v2 before resolving the store to any new
+request, and subsequent HMR evaluations reuse the same v2 promise. It does not
+close the old connection or interrupt in-flight requests. The SQLite file and
+all business records remain in place. A fresh process follows normal startup.
+
+A non-HMR process still running old source must be restarted during rollout;
+starting another preview does not patch it. The coordinating agent owns preview
+lifecycle and current-preview validation. This change does not terminate the
+user's port-3000 process or manually open/mutate its database. No deployment is
+performed; the running app initializes its migration on its next store request.
 
 Do not roll back by deleting migration markers or restoring legacy permissions.
 The schema downgrade in the regression fixture runs only on temporary test
@@ -52,6 +57,11 @@ of all other tables and a synthetic file, original-code unlock, and two further
 reopens retaining the new explicit grant. Independent QA additionally injects a
 legacy-shaped row through each adapter after initialization and checks denial
 until explicit unlock in `tests/qa-ownership.test.ts`.
+
+`tests/storage-cache.test.ts` holds a real three-column v1 TypeORM connection
+in the old global cache, then loads the current initializer. It proves that the
+old connection remains open, v2 migration finishes before unlock, stored posts
+survive, and another HMR module evaluation reuses the new promise and grant.
 
 These are engineering regression tests, not independent QA approval. Issue #22
 stays open until QA executes its own acceptance against the pushed commit.
