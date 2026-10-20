@@ -64,3 +64,12 @@ storage changes; new repeated cards stay at 8px radius or below.
 Brand/design changes beyond these references need a groomed issue, not accidental
 drift hidden in a persistence or contract change. Runtime and privacy correctness
 still take precedence over visual similarity to a reference.
+
+## Motion Addendum
+
+The [2026-10-20 motion and ownership addendum](ux-motion-2026-10-20.md) records
+the latest user decisions. Follow groomed [#24](https://github.com/maksatworkspace-sudo/studylist/issues/24)
+for cohesive 250-450ms auth/dialog/toast/page transitions, responsive control
+feedback and reduced-motion behavior. Preserve existing #23 polish. Motion must
+never delay security updates, expose previous-account data, erase drafts or
+substitute a success animation for a confirmed successful server result.
