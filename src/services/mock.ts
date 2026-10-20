@@ -211,18 +211,21 @@ export function createMockService(options: MockOptions = {}): MockService {
     return result!;
   }
   function mutate(name: string, d: Record<string, unknown>): Result {
+    // Session rotation (any login or logout) ends anonymous ownership: guest
+    // grants belong to the session that earned them, never to the account.
+    const rotate = () => grants.clear();
     if (name === "demoLogin") {
       const role = z.enum(roles).parse(d.role);
       const person = people.find((p) => p.role === role && p.active);
       if (!person) fail("Сынақ аккаунты қолжетімсіз.", 404);
-      viewerId = person!.id; return { ok: true };
+      rotate(); viewerId = person!.id; return { ok: true };
     }
-    if (name === "logout") { viewerId = null; return { ok: true }; }
+    if (name === "logout") { rotate(); viewerId = null; return { ok: true }; }
     if (name === "login") {
       const address = email(d.email); const password = text(d.password, 1, 128);
       const person = people.find((p) => p.email === address && p.password === password && p.active);
       if (!person?.verified) fail("Email, құпиясөз немесе email растауын тексеріңіз.", 401);
-      viewerId = person!.id; return { ok: true };
+      rotate(); viewerId = person!.id; return { ok: true };
     }
     if (name === "register" || name === "createStaff") {
       if (name === "createStaff") leadership();

@@ -65,6 +65,61 @@ test.describe("roles, privacy and denials", () => {
     await expect(page.getByText(/@maxball\.example/)).toHaveCount(0);
   });
 
+  test("guest ownership does not follow the login and page counters stay scoped", async ({ page }) => {
+    const title = `Қонақ жазбасы ${Date.now()}`;
+    await page.goto("/");
+    await page.getByRole("button", { name: "Жазба қалдыру" }).first().click();
+    const form = page
+      .locator("form")
+      .filter({ has: page.getByPlaceholder("Не туралы айтқыңыз келеді?") })
+      .first();
+    await form.locator('input[name="title"]').fill(title);
+    await form
+      .getByPlaceholder("Ойыңызды, ұсынысыңызды немесе мәселеңізді жазыңыз")
+      .fill("Қонақ ретінде қалдырылған сынақ жазбасы.");
+    await form.getByText("Анонимді жариялау").click();
+    await form.getByRole("button", { name: "Жариялау" }).click();
+    const receipt = page.getByRole("dialog");
+    await expect(receipt.locator(".secret-code code")).toBeVisible();
+    const code = (
+      await receipt.locator(".secret-code code").innerText()
+    ).trim();
+    await receipt.getByRole("button", { name: "Түсінікті" }).click();
+    await closeOpenDialogs(page);
+    // The fresh post leads the feed; its #number chip feeds the receipt finder.
+    const number = (
+      await page.locator(".post-card-meta > small").first().innerText()
+    ).replace(/\D+/g, "");
+
+    // Logging into an account must not inherit the guest session's posts.
+    await loginAs(page, ACCOUNTS.user);
+    await page.getByRole("button", { name: "Менің жазбаларым" }).click();
+    await expect(page.getByText(title)).toHaveCount(0);
+    // Every counter on the page describes the page scope, not the whole feed.
+    const stripCount = Number(
+      await page.locator(".overview-strip strong").first().innerText(),
+    );
+    const metaCount = Number(
+      (await page.locator(".list-meta span").first().innerText()).replace(
+        /\D+/g,
+        "",
+      ),
+    );
+    expect(stripCount).toBeGreaterThan(0);
+    expect(stripCount).toBe(metaCount);
+    await logoutVia(page);
+
+    // The receipt code is the way back to the guest post.
+    await page.getByRole("button", { name: "Өтінішті табу" }).click();
+    const track = page.getByRole("dialog");
+    await track.locator('input[name="number"]').fill(number);
+    await track.locator('input[name="code"]').fill(code);
+    await track.getByRole("button", { name: "Өтінішті ашу" }).click();
+    await expect(page.getByText(title).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Өзгерту" })).toBeVisible();
+    await closeOpenDialogs(page);
+  });
+
   test("moderation controls exist for admins and are denied to others", async ({ page }) => {
     await page.goto("/");
     await loginAs(page, ACCOUNTS.boss);

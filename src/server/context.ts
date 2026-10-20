@@ -116,16 +116,10 @@ export async function rotateSession(
         : null,
     });
     if (oldHash) {
-      // Guest grants survive a login; staged uploads follow the session.
-      for (const grant of await tx.find("guest_grants", {
-        token_hash: oldHash,
-      }))
-        if (Date.parse(String(grant.expires_at)) > Date.now())
-          await tx.insert("guest_grants", {
-            token_hash: nextHash,
-            feedback_id: grant.feedback_id,
-            expires_at: grant.expires_at,
-          }).catch(() => {});
+      // Anonymous ownership is bound to the session that earned it: rotating
+      // (login or logout) drops the old session and its guest grants with the
+      // cascade, so guest posts never follow an account. Access returns only
+      // through the receipt code (unlockPost). Staged uploads follow the session.
       for (const file of await tx.find("attachments", { token_hash: oldHash }))
         await tx.update("attachments", String(file.id), { token_hash: nextHash });
       await tx.delete("sessions", oldHash);

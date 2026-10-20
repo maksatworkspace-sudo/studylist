@@ -125,6 +125,24 @@ describe("anonymous feedback and author access", () => {
     });
     expect(notices).toHaveLength(1);
   });
+  it("ends anonymous ownership when the session rotates and restores it only by code", async () => {
+    const created = await create(guest);
+    expect((await detail(guest, created.id)).post.isOwner).toBe(true);
+    // Logging into an account must not inherit the browser's guest grants.
+    await authAction(guest, "demoLogin", { role: "user" });
+    const inherited = (await detail(guest, created.id)).post;
+    expect(inherited.isOwner).toBe(false);
+    expect(inherited.canEdit).toBe(false);
+    // The receipt code is the only way back in.
+    await action(guest, "unlockPost", {
+      number: created.number,
+      code: created.code,
+    });
+    expect((await detail(guest, created.id)).post.isOwner).toBe(true);
+    // Leaving the account ends the code-restored access as well.
+    await authAction(guest, "logout");
+    expect((await detail(guest, created.id)).post.isOwner).toBe(false);
+  });
   it("rotates recovery codes and invalidates previous grants", async () => {
     const created = await create(guest, { email: "recovery@example.com" });
     const recovery = (await action(guest, "recoverPost", {
