@@ -47,6 +47,22 @@ const edit = (ctx: Context, id: string) => action(ctx, "editPost", {
 });
 
 describe(`QA #22 explicit guest access (${adapterName()})`, () => {
+  it("does not trust legacy creation-time grants without explicit unlock proof", async () => {
+    const guest = await context();
+    const receipt = await create(guest);
+    // Old releases persisted exactly this row on create/recovery without a code entry.
+    await store.insert("guest_grants", {
+      token_hash: guest.sessionHash, feedback_id: receipt.id,
+      expires_at: new Date(Date.now() + 43_200_000).toISOString(),
+    });
+    expect((await detail(guest, receipt.id)).post).toMatchObject({
+      isOwner: false, canEdit: false, isAccountOwner: false,
+    });
+    await expect(edit(guest, receipt.id)).rejects.toMatchObject({ status: 403 });
+    await unlock(guest, receipt);
+    expect((await detail(guest, receipt.id)).post.canEdit).toBe(true);
+  });
+
   it("returns a receipt but creates no grant or editing permission", async () => {
     const guest = await context();
     const receipt = await create(guest);
