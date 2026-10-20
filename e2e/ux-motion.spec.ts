@@ -10,6 +10,7 @@ async function navigation(page: Page, name: string) {
     name: name === "Кері байланыс" ? /^Кері байланыс(?:\s+\d+)?$/ : name,
     exact: true,
   });
+  await expect(button).toBeAttached();
   if (!(await button.isVisible()))
     await page.getByRole("button", { name: "Мәзір", exact: true }).click();
   await button.click();
