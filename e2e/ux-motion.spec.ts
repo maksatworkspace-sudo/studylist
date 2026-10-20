@@ -7,7 +7,7 @@ const email = `qa-motion-${randomUUID()}@example.invalid`;
 const password = "Maxball2026";
 async function navigation(page: Page, name: string) {
   const button = page.locator(".sidebar").getByRole("button", {
-    name: name === "Кері байланыс" ? /^Кері байланыс(?:\s+\d+)?$/ : name,
+    name: name === "Кері байланыс" ? /^Кері байланыс(?:\s*\d+)?$/ : name,
     exact: true,
   });
   await expect(button).toBeAttached();

@@ -147,9 +147,9 @@ test.describe("guest flow", () => {
     await dialog.getByRole("button", { name: "Түсінікті" }).click();
     await closeOpenDialogs(page);
 
-    // Open the receipt finder. force:true because the click itself opens a
-    // native modal that would otherwise trip Playwright's hit-target check.
-    await page.getByRole("button", { name: "Өтінішті табу" }).click({ force: true });
+    // Wait for native modal exit, then retain Playwright's hit-target checks.
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await page.getByRole("button", { name: "Өтінішті табу" }).click();
     const finder = page.getByRole("dialog");
     await expect(finder).toBeVisible();
 
