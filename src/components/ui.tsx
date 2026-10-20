@@ -108,6 +108,24 @@ export function Dialog({
       className={`dialog ${wide ? "wide" : ""} ${exiting ? "exiting" : ""}`}
       inert={exiting}
       aria-hidden={exiting || undefined}
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        if (e.key !== "Tab" || exiting) return;
+        const dialog = e.currentTarget;
+        const controls = Array.from(dialog.querySelectorAll<HTMLElement>(
+          "button, a[href], input, select, textarea, [tabindex]",
+        )).filter((node) => node.tabIndex >= 0 && !node.matches(":disabled") &&
+          !node.closest("[inert]") && node.getClientRects().length > 0 &&
+          getComputedStyle(node).visibility !== "hidden");
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (!first || (e.shiftKey ? document.activeElement === first : document.activeElement === last) ||
+          document.activeElement === dialog) {
+          e.preventDefault();
+          (e.shiftKey ? last : first)?.focus();
+          if (!first) dialog.focus();
+        }
+      }}
       onCancel={(e) => {
         e.preventDefault();
         onClose();
