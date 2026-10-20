@@ -1,11 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 import type { Boot, Post } from "../src/lib/types";
 
 // Independent #21/#24 acceptance. Run only against the isolated CI/verify app.
-const email = "demo1@maxball.example";
+const email = `qa-motion-${randomUUID()}@example.invalid`;
 const password = "Maxball2026";
 async function navigation(page: Page, name: string) {
-  const button = page.getByRole("button", { name, exact: true });
+  const button = page.locator(".sidebar").getByRole("button", {
+    name: name === "Кері байланыс" ? /^Кері байланыс(?:\s+\d+)?$/ : name,
+    exact: true,
+  });
   if (!(await button.isVisible()))
     await page.getByRole("button", { name: "Мәзір", exact: true }).click();
   await button.click();
@@ -47,6 +51,26 @@ async function counts(page: Page, posts: Post[]) {
 }
 
 test.describe("independent counts and motion acceptance", () => {
+  test.beforeAll(async ({ playwright, baseURL }) => {
+    if (!baseURL) throw new Error("An isolated TEST_URL is required for QA fixtures.");
+    const api = await playwright.request.newContext({
+      baseURL, extraHTTPHeaders: { origin: baseURL },
+    });
+    try {
+      expect((await api.get("/api/state")).ok()).toBe(true);
+      const registered = await api.post("/api/actions", { data: {
+        action: "register", email, password, name: "QA Motion Fixture", phone: "+70000009999",
+      } });
+      expect(registered.ok()).toBe(true);
+      const receipt = await registered.json();
+      expect(receipt.localToken).toBeTruthy();
+      expect((await api.post("/api/actions", { data: {
+        action: "confirmEmail", token: receipt.localToken,
+      } })).ok()).toBe(true);
+      expect((await api.post("/api/actions", { data: { action: "logout" } })).ok()).toBe(true);
+    } finally { await api.dispose(); }
+  });
+
   test("dialog and shell remain usable at all required normal/reduced-motion sizes", async ({ page }) => {
     for (const reducedMotion of ["no-preference", "reduce"] as const) {
       await page.emulateMedia({ reducedMotion });
