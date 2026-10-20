@@ -46,7 +46,6 @@ import {
   read,
   send,
   teacherColor,
-  temporaryPreview,
   type Result,
 } from "@/lib/client";
 import {
@@ -427,31 +426,6 @@ export default function Maxball() {
                 <span>Өтінішті табу</span>
                 <ChevronRight size={16} />
               </button>
-              {data.demo && (
-                <label className="demo-control">
-                  <span>
-                    <span className="live-dot" />
-                    {temporaryPreview() ? "Уақытша сынақ" : "Сынақ ортасы"}
-                  </span>
-                  <select
-                    aria-label="Сынақ рөлі"
-                    value={data.viewer?.role || "guest"}
-                    onChange={(e) =>
-                      quick(
-                        e.target.value === "guest" ? "logout" : "demoLogin",
-                        { role: e.target.value },
-                      )
-                    }
-                  >
-                    <option value="guest">Қонақ</option>
-                    {Object.entries(roleLabels).map(([role, label]) => (
-                      <option key={role} value={role}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              )}
               {data.viewer && (
                 <button className="logout" onClick={() => quick("logout")}>
                   <LogOut size={16} />

@@ -1,14 +1,42 @@
 import type { Store } from "./store/types";
-import { passwordHash, token } from "./security";
+import { passwordHash, passwordMatches, token } from "./security";
 
 export const demoId = (n: number) =>
   `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const hoursAgo = (hours: number) =>
   new Date(Date.now() - hours * 3_600_000).toISOString();
 
+/**
+ * Published demo logins (user / teacher / leadership). Their password hashes
+ * are (re)asserted on every adapter initialization so demos always work with
+ * the documented credentials, even on databases seeded earlier.
+ */
+export const DEMO_PASSWORD = "Maxball2026";
+export const demoLogins = {
+  user: "demo1@maxball.example",
+  teacher: "demo4@maxball.example",
+  boss: "demo6@maxball.example",
+} as const;
+async function ensureDemoLogins(repo: Store) {
+  for (const email of Object.values(demoLogins)) {
+    const profile = await repo.first("profiles", { email });
+    if (!profile) continue;
+    const key = String(profile.id);
+    const credential = await repo.get("local_credentials", key);
+    if (credential && passwordMatches(DEMO_PASSWORD, String(credential.password_hash)))
+      continue;
+    const row = { profile_id: key, password_hash: passwordHash(DEMO_PASSWORD) };
+    if (credential) await repo.update("local_credentials", key, row);
+    else await repo.insert("local_credentials", row);
+  }
+}
+
 /** Deterministic demo fixtures shared by every adapter. */
 export async function seed(repo: Store) {
-  if ((await repo.first("profiles", {})) !== undefined) return;
+  if ((await repo.first("profiles", {})) !== undefined) {
+    await ensureDemoLogins(repo);
+    return;
+  }
   await repo.transaction(async (tx) => {
     const people = [
       [1, "Аружан Әлім", "user"],
@@ -184,4 +212,5 @@ export async function seed(repo: Store) {
       created_at: hoursAgo(8),
     });
   });
+  await ensureDemoLogins(repo);
 }

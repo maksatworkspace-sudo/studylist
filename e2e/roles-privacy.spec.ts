@@ -1,7 +1,6 @@
 // Role, privacy and moderation-denial browser flows (Refs #19).
-// The isolated dev instance exposes the demo role switch (select[aria-label=
-// "Сынақ рөлі"]) which maps to the real demoLogin action — the same session,
-// permission and privacy code paths as production roles.
+// Roles are exercised through the real login dialog with the published demo
+// accounts (src/server/seed.ts): user, teacher and leadership ("boss").
 import { expect, test, type Page } from "@playwright/test";
 /** Closes any open native modal dialog (Escape cancels; X is the fallback). */
 async function closeOpenDialogs(page: Page) {
@@ -19,15 +18,31 @@ async function closeOpenDialogs(page: Page) {
 }
 
 
-async function switchRole(page: Page, role: "guest" | "user" | "teacher" | "admin" | "leadership") {
-  await page.locator('select[aria-label="Сынақ рөлі"]').selectOption(role);
-  await expect(page.locator('select[aria-label="Сынақ рөлі"]')).toHaveValue(role);
+const ACCOUNTS = {
+  user: "demo1@maxball.example",
+  teacher: "demo4@maxball.example",
+  boss: "demo6@maxball.example",
+};
+const PASSWORD = "Maxball2026";
+
+/** Logs in through the real login dialog and waits for the session UI. */
+async function loginAs(page: Page, email: string) {
+  await page.getByRole("button", { name: "Кіру", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.locator('input[name="email"]').fill(email);
+  await dialog.locator('input[name="password"]').fill(PASSWORD);
+  await dialog.getByRole("button", { name: "Кіру" }).click();
+  await expect(page.getByRole("button", { name: "Шығу" })).toBeVisible();
+}
+
+async function logoutVia(page: Page) {
+  await page.getByRole("button", { name: "Шығу" }).click();
+  await expect(page.getByRole("button", { name: "Кіру", exact: true })).toBeVisible();
 }
 
 test.describe("roles, privacy and denials", () => {
   test("anonymous post hides the author identity from managers", async ({ page }) => {
     await page.goto("/");
-    await switchRole(page, "guest");
     await page.getByRole("button", { name: "Жазба қалдыру" }).first().click();
     const form = page
       .locator("form")
@@ -44,7 +59,7 @@ test.describe("roles, privacy and denials", () => {
     await receipt.getByRole("button", { name: "Түсінікті" }).click();
     await closeOpenDialogs(page);
 
-    await switchRole(page, "admin");
+    await loginAs(page, ACCOUNTS.boss);
     await expect(page.getByText("Анонимді автор").first()).toBeVisible();
     // No demo/personal email may leak into the manager UI for anonymous posts.
     await expect(page.getByText(/@maxball\.example/)).toHaveCount(0);
@@ -52,20 +67,21 @@ test.describe("roles, privacy and denials", () => {
 
   test("moderation controls exist for admins and are denied to others", async ({ page }) => {
     await page.goto("/");
-    await switchRole(page, "admin");
+    await loginAs(page, ACCOUNTS.boss);
     await expect(page.getByRole("button", { name: "Өтінішті табу" })).toBeVisible();
+    await logoutVia(page);
 
-    await switchRole(page, "user");
+    await loginAs(page, ACCOUNTS.user);
     await expect(page.getByRole("button", { name: /Жасыру/ })).toHaveCount(0);
     await expect(page.getByText("Мәртебені сақтау")).toHaveCount(0);
+    await logoutVia(page);
 
-    await switchRole(page, "guest");
     await expect(page.getByRole("button", { name: /Жасыру/ })).toHaveCount(0);
   });
 
   test("teacher ratings: a signed-in user can rate, a guest is denied", async ({ page }) => {
     await page.goto("/");
-    await switchRole(page, "user");
+    await loginAs(page, ACCOUNTS.user);
     await page.getByRole("button", { name: "Оқытушылар" }).click();
     // Open the rating dialog for the first teacher (seeded demo users may
     // already have rated, so the button reads "change rating" instead).
@@ -96,7 +112,7 @@ test.describe("roles, privacy and denials", () => {
     await closeOpenDialogs(page);
 
     // A guest clicking the same action gets the login dialog, not the form.
-    await switchRole(page, "guest");
+    await logoutVia(page);
     await page.getByRole("button", { name: "Оқытушылар" }).click();
     await page
       .getByRole("button", { name: /Бағалау|Бағаны өзгерту/ })

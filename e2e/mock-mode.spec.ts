@@ -37,9 +37,6 @@ test.describe("mockService mode", () => {
       .fill("Мок қызметі арқылы жіберілген хабарлама.");
     await page.getByRole("button", { name: "Жариялау" }).click();
     await expect(page.getByRole("dialog").locator(".secret-code code")).toBeVisible();
-    await expect(
-      page.getByText(/Уақытша сынақ|Сынақ ортасы/).first(),
-    ).toBeVisible();
 
     expect(apiRequests, "mock mode must not touch the application API").toEqual([]);
   });
