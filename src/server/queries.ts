@@ -44,6 +44,7 @@ export async function posts(ctx: Context, id?: string): Promise<Post[]> {
           (g) =>
             g.feedback_id === f.id &&
             g.token_hash === ctx.sessionHash &&
+            g.explicit_unlock === true &&
             Date.parse(iso(g.expires_at)) > now,
         );
       return {

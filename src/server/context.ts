@@ -157,6 +157,6 @@ export async function owns(ctx: Context, id: string, repo: Store = ctx.store) {
     token_hash: ctx.sessionHash,
   });
   return grants.some(
-    (grant) => Date.parse(String(grant.expires_at)) > Date.now(),
+    (grant) => grant.explicit_unlock === true && Date.parse(String(grant.expires_at)) > Date.now(),
   );
 }

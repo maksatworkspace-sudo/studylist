@@ -19,8 +19,8 @@ import {
 
 type ColumnKind = "text" | "integer" | "boolean" | "real";
 
-/** Single source of truth for entities and DDL. */
-const tables: Record<Table, Record<string, ColumnKind>> = {
+/** Frozen v1 columns: later entity changes must not rewrite historical DDL. */
+const tablesV1: Record<Table, Record<string, ColumnKind>> = {
   profiles: { id: "text", name: "text", email: "text", phone: "text", role: "text", verified: "boolean", active: "boolean", created_at: "text" },
   courses: { id: "text", name: "text", active: "boolean" },
   teachers: { id: "text", profile_id: "text", name: "text", subject: "text", color: "text", active: "boolean" },
@@ -44,6 +44,11 @@ const tables: Record<Table, Record<string, ColumnKind>> = {
   submissions: { key: "text", feedback_id: "text" },
 };
 
+const tables: Record<Table, Record<string, ColumnKind>> = {
+  ...tablesV1,
+  guest_grants: { ...tablesV1.guest_grants, explicit_unlock: "boolean" },
+};
+
 const SQLITE_TYPE: Record<ColumnKind, string> = {
   text: "TEXT",
   integer: "INTEGER",
@@ -54,12 +59,15 @@ const SQLITE_TYPE: Record<ColumnKind, string> = {
 function entities(): EntitySchema[] {
   return Object.entries(tables).map(([name, columns]) => {
     const definition: Record<string, EntitySchemaColumnOptions> = {};
-    for (const [column, kind] of Object.entries(columns))
+    for (const [column, kind] of Object.entries(columns)) {
+      const unlockProof = name === "guest_grants" && column === "explicit_unlock";
       definition[column] = {
         type: kind === "boolean" ? "boolean" : kind,
         primary: primaryKeys[name as Table].includes(column),
-        nullable: !primaryKeys[name as Table].includes(column),
+        nullable: !primaryKeys[name as Table].includes(column) && !unlockProof,
+        ...(unlockProof ? { default: false } : {}),
       };
+    }
     return new EntitySchema<Row>({
       name: `maxball_${name}`,
       tableName: name,
@@ -70,7 +78,7 @@ function entities(): EntitySchema[] {
 
 /** Version 1 DDL; future schema changes append version 2+, never rewrite. */
 const MIGRATION_V1 = [
-  ...Object.entries(tables).map(([name, columns]) => {
+  ...Object.entries(tablesV1).map(([name, columns]) => {
     const pk = primaryKeys[name as Table];
     const parts = Object.entries(columns).map(([column, kind]) => {
       const pkMark = pk.length === 1 && pk.includes(column) ? " PRIMARY KEY" : "";
@@ -111,6 +119,20 @@ export async function openSqliteStore(path?: string): Promise<SqliteStore> {
         await manager.query(statement);
       await manager.query(
         "INSERT INTO store_migrations(version, applied_at) VALUES (1, ?)",
+        [new Date().toISOString()],
+      );
+    }
+    const securityMigration = await manager.query(
+      "SELECT version FROM store_migrations WHERE version = 2",
+    );
+    if (securityMigration.length === 0) {
+      // Old creation/recovery and code-unlock grants were indistinguishable.
+      // Fail closed for all historical rows; valid receipts can unlock again.
+      await manager.query(
+        "ALTER TABLE guest_grants ADD COLUMN explicit_unlock INTEGER NOT NULL DEFAULT 0",
+      );
+      await manager.query(
+        "INSERT INTO store_migrations(version, applied_at) VALUES (2, ?)",
         [new Date().toISOString()],
       );
     }

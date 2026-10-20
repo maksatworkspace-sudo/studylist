@@ -195,12 +195,15 @@ export async function action(ctx: Context, name: string, input: unknown) {
     const grantKey = `${ctx.sessionHash}|${post.id}`;
     const existing = await ctx.store.get("guest_grants", grantKey);
     if (existing)
-      await ctx.store.update("guest_grants", grantKey, { expires_at: inHours(12) });
+      await ctx.store.update("guest_grants", grantKey, {
+        expires_at: inHours(12), explicit_unlock: true,
+      });
     else
       await ctx.store.insert("guest_grants", {
         token_hash: ctx.sessionHash,
         feedback_id: String(post.id),
         expires_at: inHours(12),
+        explicit_unlock: true,
       });
     return { ok: true, id: String(post.id) };
   }
