@@ -103,6 +103,19 @@ export async function action(ctx: Context, name: string, input: unknown) {
           : data.type === "suggestion"
             ? "in_progress"
             : null;
+      // Catalog references must resolve to usable entries (user-test-bug #7):
+      // reject missing/inactive targets before creating anything so staged
+      // uploads and idempotency keys stay untouched.
+      if (data.courseId) {
+        const course = await repo.get("courses", data.courseId);
+        if (!course || !course.active)
+          throw new AppError("Таңдалған курс табылмады немесе қолжетімсіз.", 400);
+      }
+      if (data.teacherId) {
+        const teacher = await repo.get("teachers", data.teacherId);
+        if (!teacher || !teacher.active)
+          throw new AppError("Таңдалған оқытушы табылмады немесе қолжетімсіз.", 400);
+      }
       const number = await repo.nextNumber();
       await repo.insert("feedback", {
         id: postId,

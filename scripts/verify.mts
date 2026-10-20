@@ -463,6 +463,7 @@ async function runHttpPhase(
       [
         "run",
         "tests/http.test.ts",
+        "tests/qa-catalog.test.ts",
         "--reporter=json",
         `--outputFile=${reportPath}`,
       ],
