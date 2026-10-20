@@ -82,6 +82,8 @@ describe("anonymous feedback and author access", () => {
     expect(serialized).not.toContain(user.viewer!.phone);
     expect(serialized).not.toContain("profile_id");
     expect((await detail(user, created.id)).post.canEdit).toBe(true);
+    expect((await detail(user, created.id)).post.isAccountOwner).toBe(true);
+    expect(seen.post.isAccountOwner).toBe(false);
   });
   it("returns a guest code once and stores only its salted hash", async () => {
     const values = input();
@@ -127,6 +129,11 @@ describe("anonymous feedback and author access", () => {
   });
   it("ends anonymous ownership when the session rotates and restores it only by code", async () => {
     const created = await create(guest);
+    expect((await detail(guest, created.id)).post.isOwner).toBe(false);
+    await action(guest, "unlockPost", {
+      number: created.number,
+      code: created.code,
+    });
     expect((await detail(guest, created.id)).post.isOwner).toBe(true);
     // Logging into an account must not inherit the browser's guest grants.
     await authAction(guest, "demoLogin", { role: "user" });
@@ -145,6 +152,10 @@ describe("anonymous feedback and author access", () => {
   });
   it("rotates recovery codes and invalidates previous grants", async () => {
     const created = await create(guest, { email: "recovery@example.com" });
+    await action(guest, "unlockPost", {
+      number: created.number,
+      code: created.code,
+    });
     const recovery = (await action(guest, "recoverPost", {
       email: "recovery@example.com",
     })) as { localToken: string };
@@ -153,6 +164,7 @@ describe("anonymous feedback and author access", () => {
     })) as Created;
     expect(restored.id).toBe(created.id);
     expect(restored.code).not.toBe(created.code);
+    expect((await detail(guest, created.id)).post.canEdit).toBe(false);
     await expect(
       action(user, "unlockPost", {
         number: created.number,

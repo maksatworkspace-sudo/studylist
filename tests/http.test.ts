@@ -27,6 +27,48 @@ class Client {
   }
 }
 describe.skipIf(!process.env.TEST_URL)("live HTTP workflows", () => {
+  it("keeps code access separate from account ownership across login, recovery and logout", async () => {
+    const browser = new Client();
+    const stranger = new Client();
+    await browser.get();
+    await stranger.get();
+    const email = `guest-${randomUUID()}@example.invalid`;
+    const values = {
+      requestId: randomUUID(), type: "issue", title: "HTTP guest ownership",
+      body: "Synthetic code-only guest ownership verification.", anonymous: true, email,
+    };
+    const created = await browser.send("createPost", values);
+    expect(created.response.status).toBe(200);
+    const { id, number, code } = created.data;
+    const edit = { id, title: "Edited guest", body: "Synthetic edited guest feedback text." };
+    expect((await browser.send("createPost", values)).data).toMatchObject({ id, duplicate: true });
+    expect((await browser.send("createPost", values)).data.code).toBeUndefined();
+    expect((await browser.send("editPost", edit)).response.status).toBe(403);
+    expect((await stranger.send("editPost", edit)).response.status).toBe(403);
+    expect((await browser.send("unlockPost", { number, code: "wrong-code" })).response.status).toBe(401);
+    expect((await browser.send("unlockPost", { number, code })).response.status).toBe(200);
+    expect((await browser.send("editPost", edit)).response.status).toBe(200);
+    await browser.send("demoLogin", { role: "user" });
+    expect((await browser.send("editPost", edit)).response.status).toBe(403);
+    await browser.send("unlockPost", { number, code });
+    expect((await browser.get(`/api/state?post=${id}`)).data.post).toMatchObject({
+      isOwner: true, isAccountOwner: false, canEdit: true,
+    });
+    expect((await browser.get()).data.posts.filter((post: { isAccountOwner: boolean; id: string }) =>
+      post.isAccountOwner).some((post: { id: string }) => post.id === id)).toBe(false);
+    const proof = await browser.send("recoverPost", { email });
+    const recovery = await browser.send("resetGuestCode", { token: proof.data.localToken });
+    expect(recovery.response.status).toBe(200);
+    expect((await browser.send("editPost", edit)).response.status).toBe(403);
+    expect((await browser.send("resetGuestCode", { token: proof.data.localToken })).response.status).toBe(400);
+    await browser.send("unlockPost", { number, code: recovery.data.code });
+    expect((await browser.send("editPost", edit)).response.status).toBe(200);
+    await browser.send("demoLogin", { role: "teacher" });
+    expect((await browser.send("editPost", edit)).response.status).toBe(403);
+    await browser.send("unlockPost", { number, code: recovery.data.code });
+    await browser.send("logout");
+    expect((await browser.send("editPost", edit)).response.status).toBe(403);
+  });
   it("enforces CSRF, anonymous visibility, real uploads, official replies and status changes", async () => {
     const guest = new Client(),
       admin = new Client(),
@@ -78,6 +120,15 @@ describe.skipIf(!process.env.TEST_URL)("live HTTP workflows", () => {
     expect(posted.response.status).toBe(200);
     expect(posted.data.code).toBeTruthy();
     const id = posted.data.id;
+    expect((await guest.get(`/api/state?post=${id}`)).data.post).toMatchObject({
+      isOwner: false, isAccountOwner: false, canEdit: false,
+    });
+    expect((await guest.send("editPost", {
+      id, title: "Denied before unlock", body: "Synthetic unapproved guest edit.",
+    })).response.status).toBe(403);
+    expect((await guest.send("unlockPost", {
+      number: posted.data.number, code: posted.data.code,
+    })).response.status).toBe(200);
     const file = await other.request(`/api/files/${prepared.data.id}`);
     expect(file.status).toBe(200);
     expect(await file.text()).toBe(contents);

@@ -261,7 +261,7 @@ components:
               date: { type: string }
     Post:
       type: object
-      required: [id, number, type, title, body, anonymous, authorName, confirmed, hidden, createdAt, updatedAt, supports, comments, supported, saved, isOwner, canEdit, answered, flagged]
+      required: [id, number, type, title, body, anonymous, authorName, confirmed, hidden, createdAt, updatedAt, supports, comments, supported, saved, isAccountOwner, isOwner, canEdit, answered, flagged]
       properties:
         id: { type: string, format: uuid }
         number: { type: integer }
@@ -287,6 +287,9 @@ components:
         supported: { type: boolean }
         saved: { type: boolean }
         isOwner: { type: boolean }
+        isAccountOwner:
+          type: boolean
+          description: True only for the signed-in account's own submission, never for temporary receipt-code access. Does not disclose author identity.
         canEdit: { type: boolean }
         answered: { type: boolean }
         flagged: { type: boolean }

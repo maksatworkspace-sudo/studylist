@@ -35,8 +35,11 @@ export async function posts(ctx: Context, id?: string): Promise<Post[]> {
     .filter((f) => !f.deleted && (!id || f.id === id))
     .sort((a, b) => Date.parse(iso(b.created_at)) - Date.parse(iso(a.created_at)))
     .map((f) => {
+      const accountOwner = Boolean(
+        ctx.viewer && access.some((a) => a.feedback_id === f.id && a.profile_id === ctx.viewer!.id),
+      );
       const owner =
-        (ctx.viewer && access.some((a) => a.feedback_id === f.id && a.profile_id === ctx.viewer!.id)) ||
+        accountOwner ||
         grants.some(
           (g) =>
             g.feedback_id === f.id &&
@@ -79,6 +82,7 @@ export async function posts(ctx: Context, id?: string): Promise<Post[]> {
           bookmarks.some(
             (b) => b.feedback_id === f.id && b.profile_id === ctx.viewer!.id,
           ),
+        isAccountOwner: accountOwner,
         isOwner: Boolean(owner),
         canEdit: Boolean(owner) && !replies.some((r) => r.feedback_id === f.id),
         answered: replies.some((r) => r.feedback_id === f.id),

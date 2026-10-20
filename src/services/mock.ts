@@ -48,7 +48,8 @@ export function createMockService(options: MockOptions = {}): MockService {
   let ratings: Rating[];
   let files: FileRecord[];
   let notices: (Boot["notifications"][number] & { owner: string })[];
-  let grants: Set<string>;
+  let grants: Map<string, number>;
+  let sessionVersion: number;
   let proofs: Map<string, Proof>;
   let requests: Map<string, Result>;
   let failures: Map<string, ServiceError[]>;
@@ -82,7 +83,7 @@ export function createMockService(options: MockOptions = {}): MockService {
         anonymous: i === 2, authorName: i === 2 ? "Анонимді автор" : people[0].name,
         status, outcome: null, confirmed: false, hidden: false, hiddenReason: null,
         createdAt: `2026-10-${String(18 + i).padStart(2, "0")}T09:00:00.000Z`, updatedAt: timestamp,
-        supports: 0, comments: 0, supported: false, saved: false, isOwner: false,
+        supports: 0, comments: 0, supported: false, saved: false, isAccountOwner: false, isOwner: false,
         canEdit: false, answered: false, flagged: false,
       };
       return { post, owner: people[0].id, email: people[0].email, code: null,
@@ -97,7 +98,7 @@ export function createMockService(options: MockOptions = {}): MockService {
       id: mockId(301), owner: mockId(1), feedbackId: mockId(1001),
       title: "MAXBALL сынақ ортасына қош келдіңіз", read: false, createdAt: timestamp,
     }];
-    grants = new Set(); proofs = new Map(); requests = new Map(); failures = new Map();
+    grants = new Map(); sessionVersion = 0; proofs = new Map(); requests = new Map(); failures = new Map();
   }
   reset();
   const viewer = () => people.find((p) => p.id === viewerId && p.active) || null;
@@ -117,7 +118,8 @@ export function createMockService(options: MockOptions = {}): MockService {
     if (person.role !== "leadership") fail("Бұл әрекет тек басшылыққа қолжетімді.", 403);
     return person;
   };
-  const owned = (entry: Entry) => Boolean(entry.owner && entry.owner === viewer()?.id || grants.has(entry.post.id));
+  const accountOwned = (entry: Entry) => Boolean(entry.owner && entry.owner === viewer()?.id);
+  const owned = (entry: Entry) => accountOwned(entry) || (grants.get(entry.post.id) || 0) > Date.now();
   function entry(id: unknown, checkVisibility = true): Entry {
     const result = entries.find((e) => e.post.id === uuid(id));
     if (!result || checkVisibility && result.post.hidden && !owned(result) && !isManager(viewer()?.role))
@@ -133,7 +135,7 @@ export function createMockService(options: MockOptions = {}): MockService {
       authorName: item.post.anonymous ? "Анонимді автор" : item.post.authorName,
       supports: item.supports.size, comments: item.comments.filter((c) => !c.deleted).length,
       supported: Boolean(person && item.supports.has(person.id)), saved: Boolean(person && item.bookmarks.has(person.id)),
-      isOwner: owned(item), canEdit: owned(item) && !item.replies.length,
+      isAccountOwner: accountOwned(item), isOwner: owned(item), canEdit: owned(item) && !item.replies.length,
       answered: Boolean(item.replies.length), flagged: isManager(person?.role) && item.post.flagged,
     });
   }
@@ -213,7 +215,7 @@ export function createMockService(options: MockOptions = {}): MockService {
   function mutate(name: string, d: Record<string, unknown>): Result {
     // Session rotation (any login or logout) ends anonymous ownership: guest
     // grants belong to the session that earned them, never to the account.
-    const rotate = () => grants.clear();
+    const rotate = () => { grants.clear(); sessionVersion++; };
     if (name === "demoLogin") {
       const role = z.enum(roles).parse(d.role);
       const person = people.find((p) => p.role === role && p.active);
@@ -239,7 +241,7 @@ export function createMockService(options: MockOptions = {}): MockService {
       people.push(person);
       if (role === "teacher") catalog.push({ id: nextId(), name: personName, subject, active: true, color: "blue", profileId: person.id });
       if (name === "createStaff") return { ok: true, message: "Уақытша сынақ аккаунты қосылды. Нақты шақыру жіберілген жоқ." };
-      viewerId = person.id; return proof("verify", person.id);
+      rotate(); viewerId = person.id; return proof("verify", person.id);
     }
     if (name === "resendConfirmation" || name === "forgotPassword") {
       const address = email(d.email);
@@ -253,7 +255,7 @@ export function createMockService(options: MockOptions = {}): MockService {
       const person = people.find((p) => p.id === token.subject && p.active);
       if (!person) fail("Аккаунт табылмады.", 404);
       if (password) person!.password = password; else person!.verified = true;
-      viewerId = person!.id; return { ok: true };
+      rotate(); viewerId = person!.id; return { ok: true };
     }
     if (name === "exchangeSession") fail("Сыртқы кіру mock режимінде қолжетімсіз.", 503);
     if (name === "updateProfile") {
@@ -264,7 +266,7 @@ export function createMockService(options: MockOptions = {}): MockService {
     }
     if (name === "createPost") {
       const requestId = uuid(d.requestId);
-      const key = `${viewer()?.id || "guest"}:${requestId}`;
+      const key = `${sessionVersion}:${requestId}`;
       const previous = requests.get(key);
       if (previous) return { ok: true, id: previous.id, number: previous.number, duplicate: true };
       const type = z.enum(["opinion", "suggestion", "issue"]).parse(d.type);
@@ -290,17 +292,18 @@ export function createMockService(options: MockOptions = {}): MockService {
           course: null, teacher: null, authorName: anonymous ? "Анонимді автор" : viewer()?.name || author,
           status, outcome: null, confirmed: false, hidden: false, hiddenReason: null,
           createdAt: timestamp, updatedAt: timestamp, supports: 0, comments: 0, supported: false,
-          saved: false, isOwner: true, canEdit: true, answered: false, flagged: false } };
-      entries.unshift(item); if (code) grants.add(id);
+          saved: false, isAccountOwner: Boolean(viewer()), isOwner: Boolean(viewer()), canEdit: Boolean(viewer()), answered: false, flagged: false } };
+      entries.unshift(item);
       attachments.forEach((f) => { f.post = id; });
       people.filter((p) => p.active && isManager(p.role)).forEach((p) => notify(p.id, id, "Жаңа кері байланыс түсті"));
-      const result = { ok: true, id, number, code }; requests.set(key, result); return result;
+      const result = { ok: true, id, number, code };
+      requests.set(key, { ok: true, id, number }); return result;
     }
     if (name === "unlockPost") {
       const number = z.coerce.number().int().positive().parse(d.number); const code = text(d.code, 1, 200);
       const item = entries.find((e) => e.post.number === number && e.code === code);
       if (!item) fail("Өтініш нөмірі немесе құпия код қате.", 401);
-      grants.add(item!.post.id); return { ok: true, id: item!.post.id };
+      grants.set(item!.post.id, Date.now() + 12 * 3_600_000); return { ok: true, id: item!.post.id };
     }
     if (name === "recoverPost") {
       const address = email(d.email); const item = entries.find((e) => e.email === address && !e.owner);
@@ -308,7 +311,7 @@ export function createMockService(options: MockOptions = {}): MockService {
     }
     if (name === "resetGuestCode") {
       const token = consume(d.token, "guest"); const item = entry(token.subject, false);
-      item.code = `MOCK-${nextId()}`; grants.add(item.post.id);
+      item.code = `MOCK-${nextId()}`; grants.delete(item.post.id);
       return { ok: true, id: item.post.id, number: item.post.number, code: item.code };
     }
     if (["toggleSupport", "toggleBookmark", "editPost", "deletePost", "comment", "officialReply", "setStatus", "resolution", "moderate"].includes(name)) {

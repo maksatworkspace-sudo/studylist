@@ -146,12 +146,6 @@ export async function action(ctx: Context, name: string, input: unknown) {
         recovery_email: ctx.viewer?.email || data.email || null,
         code_hash: code ? passwordHash(code) : null,
       });
-      if (code)
-        await repo.insert("guest_grants", {
-          token_hash: ctx.sessionHash,
-          feedback_id: postId,
-          expires_at: inHours(12),
-        });
       if (status)
         await repo.insert("status_history", {
           id: randomUUID(),
@@ -281,11 +275,6 @@ export async function action(ctx: Context, name: string, input: unknown) {
         code_hash: passwordHash(code),
       });
       await repo.deleteWhere("guest_grants", { feedback_id: subjectId });
-      await repo.insert("guest_grants", {
-        token_hash: ctx.sessionHash,
-        feedback_id: subjectId,
-        expires_at: inHours(12),
-      });
       const post = await repo.get("feedback", subjectId);
       if (!post || post.deleted) throw new AppError("Өтініш қолжетімсіз.", 404);
       return { id: subjectId, number: Number(post.number) };

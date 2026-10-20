@@ -47,6 +47,7 @@ export type Post = {
   comments: number;
   supported: boolean;
   saved: boolean;
+  isAccountOwner: boolean;
   isOwner: boolean;
   canEdit: boolean;
   answered: boolean;
