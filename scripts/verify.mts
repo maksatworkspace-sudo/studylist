@@ -623,13 +623,18 @@ async function selfTest(
   name: "busy-port" | "failing-command" | "missing-env",
 ): Promise<number> {
   if (name === "missing-env") {
+    // Unset path is valid (staging-local default); an explicit path inside
+    // the repository must be rejected so runs never touch working-tree state.
     try {
-      validateEnvironment({ MAXBALL_ADAPTER: "sqlite" });
+      validateEnvironment({
+        MAXBALL_ADAPTER: "sqlite",
+        MAXBALL_SQLITE_PATH: path.join(repoRoot, "data", "test.sqlite"),
+      });
     } catch {
-      console.log("self-test missing-env: PASS (incomplete adapter rejected)");
+      console.log("self-test missing-env: PASS (unsafe adapter path rejected)");
       return 0;
     }
-    console.error("self-test missing-env: FAIL (incomplete adapter was accepted)");
+    console.error("self-test missing-env: FAIL (unsafe adapter path was accepted)");
     return 1;
   }
   if (name === "failing-command") {
