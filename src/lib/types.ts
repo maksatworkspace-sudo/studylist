@@ -61,6 +61,9 @@ export type Comment = {
   parentId: string | null;
   mine: boolean;
   deleted: boolean;
+  hidden: boolean;
+  /** Moderation reason; only serialized for managers. */
+  hiddenReason: string | null;
   createdAt: string;
 };
 export type Attachment = {
@@ -97,6 +100,72 @@ export type Statistics = {
   statuses: { status: Status; count: number }[];
   comparison: { current: number; previous: number };
 };
+export type ReportReason =
+  | "spam"
+  | "harassment"
+  | "inappropriate"
+  | "other";
+export type ReportStatus = "new" | "reviewing" | "resolved" | "dismissed";
+export const reportReasonLabels: Record<ReportReason, string> = {
+  spam: "Спам",
+  harassment: "Қорлау",
+  inappropriate: "Жарамсыз мазмұн",
+  other: "Басқа",
+};
+export const reportStatusLabels: Record<ReportStatus, string> = {
+  new: "Жаңа",
+  reviewing: "Қаралуда",
+  resolved: "Шешілді",
+  dismissed: "Қайтарылды",
+};
+export type Report = {
+  id: string;
+  targetType: "post" | "comment";
+  targetId: string;
+  reason: ReportReason;
+  note: string;
+  status: ReportStatus;
+  /** Display label only ("Қонақ" for guests); never a session identifier. */
+  reporter: string;
+  /** Post number when the target is (or was) a post, for navigation. */
+  targetNumber: number | null;
+  targetFeedbackId: string | null;
+  targetTitle: string;
+  targetHidden: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type ModerationEntry = {
+  id: string;
+  action: string;
+  targetType: "post" | "comment" | "report";
+  targetId: string;
+  targetNumber: number | null;
+  targetFeedbackId: string | null;
+  reason: string;
+  prevState: string;
+  newState: string;
+  moderator: string;
+  createdAt: string;
+};
+export type Moderation = {
+  reports: Report[];
+  log: ModerationEntry[];
+  hiddenComments: {
+    id: string;
+    feedbackId: string;
+    number: number | null;
+    snippet: string;
+    reason: string | null;
+    createdAt: string;
+  }[];
+  counts: {
+    newReports: number;
+    pendingReports: number;
+    hiddenPosts: number;
+    hiddenComments: number;
+  };
+};
 export type Boot = {
   viewer: Viewer | null;
   demo: boolean;
@@ -110,6 +179,8 @@ export type Boot = {
     teachers: { id: string; name: string; subject: string; active: boolean }[];
   } | null;
   stats: Statistics | null;
+  /** Manager-only moderation dashboard payload (reports, audit log, counts). */
+  moderation: Moderation | null;
   integrations: { email: boolean; ai: boolean; storage: boolean } | null;
 };
 export const typeLabels: Record<FeedbackType, string> = {

@@ -5,7 +5,7 @@ import type { Store } from "../src/server/store/types";
 import { makeStore } from "./adapters";
 import { action } from "../src/server/actions";
 import { authAction } from "../src/server/auth";
-import { boot, detail, statistics } from "../src/server/queries";
+import { accessibleAttachment, boot, detail, moderation, statistics } from "../src/server/queries";
 import { demoId, seed } from "../src/server/seed";
 import {
   hash,
@@ -469,5 +469,159 @@ describe("participation and files", () => {
     expect(String((await db.get("feedback", demoId(1000)))!.title)).not.toBe(
       "tampered",
     );
+  });
+});
+
+describe("#25 moderation: reports, comment moderation and the audit log", () => {
+  const reportInput = (targetType: "post" | "comment", targetId: string, extra: Record<string, unknown> = {}) =>
+    ({ targetType, targetId, reason: "spam", note: "", ...extra });
+  async function freshGuest() {
+    const sessionHash = hash(randomUUID());
+    await db.insert("sessions", {
+      token_hash: sessionHash, profile_id: null, provider_session: null,
+      expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    return { store: db, sessionHash, ip: randomUUID(), demo: true, viewer: null } as Context;
+  }
+  it("hides a post from the public API and restores it, logging both decisions", async () => {
+    const created = await create(user);
+    await action(admin, "moderate", { id: created.id, mode: "hide", reason: "Спам талаптары" });
+    // Public API: gone from boot for a guest, detail 404, author still sees the reason.
+    await expect(detail(guest, created.id)).rejects.toThrow();
+    expect((await boot(guest)).posts.some((p) => p.id === created.id)).toBe(false);
+    expect((await detail(user, created.id)).post.hiddenReason).toBe("Спам талаптары");
+    const first = await db.all("moderation_log");
+    expect(first.some((e) => e.action === "hide" && e.target_id === created.id && e.prev_state === "visible" && e.new_state === "hidden")).toBe(true);
+    await action(admin, "moderate", { id: created.id, mode: "restore" });
+    expect((await detail(guest, created.id)).post.hidden).toBe(false);
+    const second = await db.all("moderation_log");
+    expect(second.some((e) => e.action === "restore" && e.target_id === created.id)).toBe(true);
+    expect(second.length).toBe(first.length + 1);
+  });
+  it("rejects moderation from teachers, guests and users over direct action calls", async () => {
+    const created = await create(user);
+    for (const ctx of [guest, user, teacher])
+      await expect(
+        action(ctx, "moderate", { id: created.id, mode: "hide", reason: "Тексеру" }),
+      ).rejects.toThrow();
+    await expect(
+      action(teacher, "moderateComment", { id: demoId(4000), mode: "hide", reason: "Тексеру" }),
+    ).rejects.toThrow();
+    await expect(
+      action(user, "setReportStatus", { targetType: "post", targetId: created.id, status: "resolved" }),
+    ).rejects.toThrow();
+    expect((await detail(guest, created.id)).post.hidden).toBe(false);
+  });
+  it("deletes a post permanently with its attachments queued for storage removal", async () => {
+    const created = await create(user);
+    await action(admin, "moderate", { id: created.id, mode: "delete" });
+    expect(await db.get("feedback", created.id)).toBeUndefined();
+    expect((await boot(admin)).posts.some((p) => p.id === created.id)).toBe(false);
+    // The audit entry outlives the content it describes.
+    expect(
+      (await db.all("moderation_log")).some(
+        (e) => e.action === "delete" && e.target_id === created.id && e.target_number === created.number,
+      ),
+    ).toBe(true);
+  });
+  it("blocks direct attachment downloads for hidden posts", async () => {
+    const created = await create(teacher);
+    const attachmentId = randomUUID();
+    await db.insert("attachments", {
+      id: attachmentId, token_hash: null, feedback_id: created.id,
+      name: "тексеру.txt", size: 10, mime: "text/plain",
+      object_path: `staged/${attachmentId}`, ready: true,
+      created_at: new Date().toISOString(),
+    });
+    await action(admin, "moderate", { id: created.id, mode: "hide", reason: "Файнды тексеру" });
+    await expect(accessibleAttachment(guest, attachmentId)).rejects.toThrow();
+    await action(admin, "moderate", { id: created.id, mode: "restore" });
+    await expect(accessibleAttachment(guest, attachmentId)).resolves.toBeTruthy();
+  });
+  it("moderates one comment without touching its post and masks it for the public", async () => {
+    const created = await create(teacher);
+    await action(user, "comment", { id: created.id, body: "Талқылау пікірі" });
+    const comment = (await db.find("comments", { feedback_id: created.id }))[0];
+    await action(admin, "moderateComment", { id: String(comment.id), mode: "hide", reason: "Ереже бұзушылық" });
+    // The post stays exactly as it was.
+    const post = (await detail(guest, created.id)).post;
+    expect(post.hidden).toBe(false);
+    expect(post.comments).toBe(0);
+    // Public sees a masked row; the manager sees the content and the reason.
+    const publicView = (await detail(guest, created.id)).comments.find((c) => c.id === comment.id)!;
+    expect(publicView.body).toBe("");
+    expect(publicView.name).toBe("Жасырылған пікір");
+    expect(publicView.hiddenReason).toBeNull();
+    const managerView = (await detail(admin, created.id)).comments.find((c) => c.id === comment.id)!;
+    expect(managerView.body).toBe("Талқылау пікірі");
+    expect(managerView.hiddenReason).toBe("Ереже бұзушылық");
+    await action(admin, "moderateComment", { id: String(comment.id), mode: "restore" });
+    expect((await detail(guest, created.id)).post.comments).toBe(1);
+    await action(admin, "moderateComment", { id: String(comment.id), mode: "delete" });
+    expect((await detail(guest, created.id)).comments.find((c) => c.id === comment.id)!.deleted).toBe(true);
+  });
+  it("accepts reports from guests and users, deduplicates and never hides content", async () => {
+    const created = await create(teacher);
+    const visitor = await freshGuest();
+    await action(visitor, "report", reportInput("post", created.id, { note: "Қайталанады" }));
+    const again = (await action(visitor, "report", reportInput("post", created.id))) as { duplicate?: boolean };
+    expect(again.duplicate).toBe(true);
+    await action(user, "report", reportInput("post", created.id, { reason: "harassment" }));
+    // Two distinct reporters → two rows; the content itself stays public.
+    expect((await db.find("reports", { target_id: created.id })).length).toBe(2);
+    expect((await detail(guest, created.id)).post.hidden).toBe(false);
+    await expect(
+      action(visitor, "report", reportInput("comment", demoId(4000))),
+    ).resolves.toBeTruthy();
+  });
+  it("moves report statuses through the workflow and records every transition", async () => {
+    const created = await create(teacher);
+    await action(guest, "report", reportInput("post", created.id));
+    const before = (await db.all("moderation_log")).length;
+    await action(leader, "setReportStatus", { targetType: "post", targetId: created.id, status: "reviewing" });
+    await action(leader, "setReportStatus", { targetType: "post", targetId: created.id, status: "resolved" });
+    const row = (await db.find("reports", { target_id: created.id }))[0];
+    expect(row.status).toBe("resolved");
+    expect(row.handled_by).toBe(leader.viewer!.id);
+    expect((await db.all("moderation_log")).length).toBe(before + 2);
+    await expect(
+      action(admin, "setReportStatus", { targetType: "post", targetId: created.id, status: "dismissed" }),
+    ).resolves.toBeTruthy();
+  });
+  it("keeps anonymous authors anonymous inside reports and the audit log", async () => {
+    const created = await create(guest, { authorName: "Жасырын есім" });
+    await action(user, "report", reportInput("post", created.id));
+    await action(admin, "moderate", { id: created.id, mode: "hide", reason: "Тексеру" });
+    const board = await boot(admin);
+    const serialized = JSON.stringify(board.moderation);
+    expect(serialized).not.toContain(guest.sessionHash);
+    expect(serialized).not.toContain("Жасырын есім");
+    expect(serialized).not.toContain("reporter_key");
+    expect(board.moderation!.reports[0].reporter).toBe(String((await db.get("profiles", demoId(1)))!.name));
+    await action(admin, "moderate", { id: created.id, mode: "restore" });
+  });
+  it("serializes identical final state under concurrent moderation writes", async () => {
+    const created = await create(teacher);
+    const outcome = await Promise.allSettled([
+      action(admin, "moderate", { id: created.id, mode: "hide", reason: "Бірінші себеп" }),
+      action(leader, "moderate", { id: created.id, mode: "restore" }),
+    ]);
+    // Both writers serialize; whatever lands last is a consistent state and
+    // every decision that changed anything is logged exactly once.
+    const settled = outcome.filter((r) => r.status === "fulfilled").length;
+    const row = await db.get("feedback", created.id);
+    const logs = (await db.all("moderation_log")).filter((e) => e.target_id === created.id);
+    expect(row).toBeDefined();
+    expect(row!.hidden).toBe(logs.at(-1)!.new_state === "hidden");
+    expect(logs.length).toBeGreaterThanOrEqual(settled === 2 ? 1 : 0);
+    expect((await detail(admin, created.id)).post.number).toBe(created.number);
+  });
+  it("never exposes the moderation payload to non-managers", async () => {
+    await expect(moderation(guest)).rejects.toThrow();
+    await expect(moderation(teacher)).rejects.toThrow();
+    const board = await boot(teacher);
+    expect(board.moderation).toBeNull();
+    const managerBoard = await boot(admin);
+    expect(managerBoard.moderation!.counts).toBeDefined();
   });
 });

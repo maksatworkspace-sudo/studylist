@@ -25,7 +25,8 @@ import {
   statusLabels,
 } from "@/lib/types";
 import { date, downloadFile, initials, read, send, size } from "@/lib/client";
-import { CopyButton, Dialog, Field, Form, StatusBadge, Tag } from "./ui";
+import { Confirm, CopyButton, Dialog, Field, Form, StatusBadge, Tag } from "./ui";
+import { ReportDialog } from "./forms";
 
 export default function PostDetail({
   id,
@@ -47,6 +48,20 @@ export default function PostDetail({
   const [edit, setEdit] = useState(false);
   const [replyTo, setReplyTo] = useState<Comment | null>(null);
   const [moderate, setModerate] = useState(false);
+  const [reportTarget, setReportTarget] = useState<{
+    type: "post" | "comment";
+    id: string;
+  } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    run: () => Promise<void>;
+  } | null>(null);
+  const [commentMod, setCommentMod] = useState<{
+    id: string;
+    mode: "hide" | "delete";
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const locked = useRef(false);
   const request = useRef(0);
@@ -238,6 +253,14 @@ export default function PostDetail({
           >
             <Share2 size={17} />
           </button>
+          <button
+            className="icon-btn"
+            aria-label="Шағым беру"
+            title="Шағым беру"
+            onClick={() => setReportTarget({ type: "post", id })}
+          >
+            <Flag size={17} />
+          </button>
           {p.canEdit && (
             <>
               <button
@@ -252,21 +275,19 @@ export default function PostDetail({
                 className="icon-btn danger"
                 title="Жазбаны өшіру"
                 aria-label="Жазбаны өшіру"
-                onClick={async () => {
-                  if (
-                    !confirm(
+                onClick={() =>
+                  setConfirmAction({
+                    title: "Жазбаны өшіру",
+                    message:
                       "Жазба мен оған тіркелген пікірлер және файлдар өшірілсін бе?",
-                    )
-                  )
-                    return;
-                  try {
-                    await send("deletePost", { id });
-                    await onChanged();
-                    onClose();
-                  } catch (e) {
-                    toast((e as Error).message);
-                  }
-                }}
+                    confirmLabel: "Өшіру",
+                    run: async () => {
+                      await send("deletePost", { id });
+                      await onChanged();
+                      onClose();
+                    },
+                  })
+                }
               >
                 <Trash2 size={17} />
               </button>
@@ -379,16 +400,19 @@ export default function PostDetail({
                   <button
                     className="text-btn danger"
                     type="button"
-                    onClick={async () => {
-                      if (!confirm("Жазба толық өшірілсін бе?")) return;
-                      try {
-                        await send("moderate", { id, mode: "delete" });
-                        await onChanged();
-                        onClose();
-                      } catch (e) {
-                        toast((e as Error).message);
-                      }
-                    }}
+                    onClick={() =>
+                      setConfirmAction({
+                        title: "Жазбаны толық өшіру",
+                        message:
+                          "Жазба, пікірлер және файлдар толық өшіріледі. Әрекетті қайтару мүмкін емес.",
+                        confirmLabel: "Толық өшіру",
+                        run: async () => {
+                          await send("moderate", { id, mode: "delete" });
+                          await onChanged();
+                          onClose();
+                        },
+                      })
+                    }
                   >
                     <Trash2 size={15} />
                     Толық өшіру
@@ -470,6 +494,21 @@ export default function PostDetail({
               <div className="comment-thread" key={c.id}>
                 <CommentRow
                   comment={c}
+                  manager={manager}
+                  onReport={(id) => setReportTarget({ type: "comment", id })}
+                  onModerate={(id, mode) => {
+                    if (mode === "restore")
+                      void (async () => {
+                        try {
+                          await send("moderateComment", { id, mode });
+                          await load();
+                          await onChanged();
+                        } catch (e) {
+                          toast((e as Error).message);
+                        }
+                      })();
+                    else setCommentMod({ id, mode });
+                  }}
                   onReply={() => setReplyTo(c)}
                   onSave={async (name, body) => {
                     await send(name, { id: c.id, body });
@@ -483,6 +522,23 @@ export default function PostDetail({
                     <div className="nested-comment" key={r.id}>
                       <CommentRow
                         comment={r}
+                        manager={manager}
+                        onReport={(id) =>
+                          setReportTarget({ type: "comment", id })
+                        }
+                        onModerate={(id, mode) => {
+                          if (mode === "restore")
+                            void (async () => {
+                              try {
+                                await send("moderateComment", { id, mode });
+                                await load();
+                                await onChanged();
+                              } catch (e) {
+                                toast((e as Error).message);
+                              }
+                            })();
+                          else setCommentMod({ id, mode });
+                        }}
                         onSave={async (name, body) => {
                           await send(name, { id: r.id, body });
                           await load();
@@ -540,6 +596,78 @@ export default function PostDetail({
           )}
         </section>
       </article>
+      {reportTarget && (
+        <ReportDialog
+          targetType={reportTarget.type}
+          targetId={reportTarget.id}
+          onClose={() => setReportTarget(null)}
+          onDone={toast}
+        />
+      )}
+      {confirmAction && (
+        <Confirm
+          title={confirmAction.title}
+          message={confirmAction.message}
+          confirmLabel={confirmAction.confirmLabel}
+          danger
+          onConfirm={confirmAction.run}
+          onClose={() => setConfirmAction(null)}
+        />
+      )}
+      {commentMod?.mode === "hide" && (
+        <Dialog
+          title="Пікірді жасыру"
+          onClose={() => setCommentMod(null)}
+        >
+          <Form
+            submit="Жасыру"
+            onSubmit={async (f) => {
+              const target = commentMod.id;
+              setCommentMod(null);
+              try {
+                await send("moderateComment", {
+                  id: target,
+                  mode: "hide",
+                  reason: String(f.get("reason")),
+                });
+                await load();
+                await onChanged();
+              } catch (e) {
+                toast((e as Error).message);
+              }
+            }}
+          >
+            <Field label="Жасыру себебі">
+              <textarea
+                name="reason"
+                required
+                minLength={3}
+                maxLength={1000}
+                rows={2}
+              />
+            </Field>
+          </Form>
+        </Dialog>
+      )}
+      {commentMod?.mode === "delete" && (
+        <Confirm
+          title="Пікірді өшіру (модерация)"
+          message="Пікір толық өшіріледі. Әрекетті қайтару мүмкін емес."
+          confirmLabel="Өшіру"
+          danger
+          onConfirm={async () => {
+            const target = commentMod.id;
+            try {
+              await send("moderateComment", { id: target, mode: "delete" });
+              await load();
+              await onChanged();
+            } catch (e) {
+              toast((e as Error).message);
+            }
+          }}
+          onClose={() => setCommentMod(null)}
+        />
+      )}
     </Dialog>
   );
 }
@@ -547,15 +675,22 @@ function CommentRow({
   comment: c,
   onReply,
   onSave,
+  manager,
+  onReport,
+  onModerate,
 }: {
   comment: Comment;
   onReply?: () => void;
   onSave: (action: string, body?: string) => Promise<void>;
+  manager: boolean;
+  onReport: (id: string) => void;
+  onModerate: (id: string, mode: "hide" | "restore" | "delete") => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
+  const [confirming, setConfirming] = useState(false);
   return (
-    <div className="comment">
+    <div className={`comment ${c.hidden ? "hidden-comment" : ""}`}>
       <span className="avatar small-avatar">{initials(c.name)}</span>
       <div className="comment-content">
         <div className="comment-meta">
@@ -580,6 +715,11 @@ function CommentRow({
         ) : (
           <p>{c.body || "Пікір өшірілген"}</p>
         )}
+        {c.hidden && c.hiddenReason && manager && (
+          <p className="comment-hidden-reason">
+            <EyeOff size={13} /> Жасыру себебі: {c.hiddenReason}
+          </p>
+        )}
         <div className="comment-tools">
           {!c.deleted && onReply && (
             <button onClick={onReply}>
@@ -587,6 +727,10 @@ function CommentRow({
               Жауап беру
             </button>
           )}
+          <button onClick={() => onReport(c.id)} disabled={c.deleted}>
+            <Flag size={13} />
+            Шағым беру
+          </button>
           {!c.deleted && c.mine && (
             <>
               <button
@@ -599,15 +743,30 @@ function CommentRow({
               <button
                 aria-label="Пікірді өшіру"
                 title="Пікірді өшіру"
-                onClick={async () => {
-                  if (confirm("Пікір өшірілсін бе?")) {
-                    try {
-                      await onSave("deleteComment");
-                    } catch (e) {
-                      setError((e as Error).message);
-                    }
-                  }
-                }}
+                onClick={() => setConfirming(true)}
+              >
+                <Trash2 size={13} />
+              </button>
+            </>
+          )}
+          {manager && !c.deleted && (
+            <>
+              {c.hidden ? (
+                <button onClick={() => onModerate(c.id, "restore")}>
+                  <Undo2 size={13} />
+                  Қайта көрсету
+                </button>
+              ) : (
+                <button onClick={() => onModerate(c.id, "hide")}>
+                  <EyeOff size={13} />
+                  Жасыру
+                </button>
+              )}
+              <button
+                className="danger"
+                aria-label="Пікірді өшіру (модерация)"
+                title="Пікірді өшіру (модерация)"
+                onClick={() => onModerate(c.id, "delete")}
               >
                 <Trash2 size={13} />
               </button>
@@ -615,6 +774,22 @@ function CommentRow({
           )}
         </div>
         {error && <p className="error">{error}</p>}
+        {confirming && (
+          <Confirm
+            title="Пікірді өшіру"
+            message="Пікіріңіз өшірілсін бе?"
+            confirmLabel="Өшіру"
+            danger
+            onConfirm={async () => {
+              try {
+                await onSave("deleteComment");
+              } catch (e) {
+                setError((e as Error).message);
+              }
+            }}
+            onClose={() => setConfirming(false)}
+          />
+        )}
       </div>
     </div>
   );

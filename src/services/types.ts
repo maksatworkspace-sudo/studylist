@@ -48,6 +48,18 @@ export type ActionInputs = {
   setStatus: { id: string; status: Status; outcome?: "implemented" | "declined" | null };
   resolution: { id: string; resolved: boolean };
   moderate: { id: string; mode: "hide" | "restore" | "delete"; reason?: string };
+  moderateComment: { id: string; mode: "hide" | "restore" | "delete"; reason?: string };
+  report: {
+    targetType: "post" | "comment";
+    targetId: string;
+    reason: "spam" | "harassment" | "inappropriate" | "other";
+    note?: string;
+  };
+  setReportStatus: {
+    targetType: "post" | "comment";
+    targetId: string;
+    status: "reviewing" | "resolved" | "dismissed";
+  };
   readNotifications: { id?: string };
   addCourse: { name: string };
   addTeacher: { name: string; subject?: string };
@@ -66,6 +78,7 @@ export const actionNames: readonly ActionName[] = [
   "createPost", "unlockPost", "recoverPost", "resetGuestCode", "toggleSupport",
   "toggleBookmark", "editPost", "deletePost", "comment", "editComment", "deleteComment",
   "rateTeacher", "officialReply", "setStatus", "resolution", "moderate",
+  "moderateComment", "report", "setReportStatus",
   "readNotifications", "addCourse", "addTeacher", "setRole", "updateCatalog",
   "setAccountActive", "prepareUpload", "completeUpload", "discardUpload", "runJobs",
 ];

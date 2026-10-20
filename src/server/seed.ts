@@ -31,9 +31,65 @@ async function ensureDemoLogins(repo: Store) {
   }
 }
 
+/**
+ * Moderation demo state (one reported post, one reported + hidden comment
+ * and its audit entry) so the dashboard demonstrates every section on both
+ * fresh and long-lived databases. Idempotent by fixed keys.
+ */
+async function ensureModerationFixtures(repo: Store) {
+  await repo
+    .insert("reports", {
+      reporter_key: `user:${demoId(2)}`,
+      target_type: "post",
+      target_id: demoId(1004),
+      reason: "spam",
+      note: "Мазмұны қайталанып келеді, спам сияқты.",
+      status: "new",
+      handled_by: null,
+      created_at: hoursAgo(5),
+      updated_at: hoursAgo(5),
+    })
+    .catch(() => {});
+  await repo
+    .insert("reports", {
+      reporter_key: `user:${demoId(3)}`,
+      target_type: "comment",
+      target_id: demoId(4000),
+      reason: "harassment",
+      note: "",
+      status: "reviewing",
+      handled_by: demoId(5),
+      created_at: hoursAgo(6),
+      updated_at: hoursAgo(4),
+    })
+    .catch(() => {});
+  const comment = await repo.get("comments", demoId(4000));
+  if (comment && !comment.hidden)
+    await repo.update("comments", demoId(4000), {
+      hidden: true,
+      hidden_reason: "Пікір талқылау ережелерін бұзады",
+    });
+  await repo
+    .insert("moderation_log", {
+      id: demoId(6000),
+      moderator_id: demoId(5),
+      action: "hide_comment",
+      target_type: "comment",
+      target_id: demoId(4000),
+      target_feedback_id: demoId(1000),
+      target_number: 1001,
+      reason: "Пікір талқылау ережелерін бұзады",
+      prev_state: "visible",
+      new_state: "hidden",
+      created_at: hoursAgo(4),
+    })
+    .catch(() => {});
+}
+
 /** Deterministic demo fixtures shared by every adapter. */
 export async function seed(repo: Store) {
   if ((await repo.first("profiles", {})) !== undefined) {
+    await ensureModerationFixtures(repo);
     await ensureDemoLogins(repo);
     return;
   }
@@ -212,5 +268,6 @@ export async function seed(repo: Store) {
       created_at: hoursAgo(8),
     });
   });
+  await ensureModerationFixtures(repo);
   await ensureDemoLogins(repo);
 }

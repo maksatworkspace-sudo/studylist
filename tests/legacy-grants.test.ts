@@ -51,15 +51,16 @@ describe("#22 legacy guest grant security migration", () => {
     await close(store);
     const raw = new Database(file);
     try {
+      // The chain grew to v3 (moderation tables); each step applies once.
       expect(raw.prepare("SELECT version FROM store_migrations ORDER BY version").all())
-        .toEqual([{ version: 1 }, { version: 2 }]);
+        .toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
       expect(raw.prepare("PRAGMA table_info(guest_grants)").all().map((row) =>
         (row as { name: string }).name)).toEqual(["token_hash", "feedback_id", "expires_at", "explicit_unlock"]);
     } finally { raw.close(); }
     await close(await open(file));
     const check = new Database(file);
     try {
-      expect(check.prepare("SELECT COUNT(*) AS total FROM store_migrations").get()).toEqual({ total: 2 });
+      expect(check.prepare("SELECT COUNT(*) AS total FROM store_migrations").get()).toEqual({ total: 3 });
     } finally { check.close(); }
   });
 

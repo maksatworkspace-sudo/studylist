@@ -37,8 +37,22 @@ import {
   Users,
   X,
 } from "lucide-react";
-import type { Boot, FeedbackType, Post, Role, Teacher } from "@/lib/types";
-import { isManager, roleLabels, statusLabels, typeLabels } from "@/lib/types";
+import type {
+  Boot,
+  FeedbackType,
+  Post,
+  Report,
+  Role,
+  Teacher,
+} from "@/lib/types";
+import {
+  isManager,
+  roleLabels,
+  statusLabels,
+  typeLabels,
+  reportReasonLabels,
+  reportStatusLabels,
+} from "@/lib/types";
 import {
   date,
   exportReport,
@@ -57,7 +71,7 @@ import {
   Receipt,
   Track,
 } from "./forms";
-import { Dialog, Empty, StatusBadge, Tag, Presence, Reveal, Notice, SessionFeedback, type AuthFeedback } from "./ui";
+import { Dialog, Empty, StatusBadge, Tag, Presence, Reveal, Notice, SessionFeedback, Confirm, Field, Form, type AuthFeedback } from "./ui";
 import PostDetail from "./post-detail";
 
 type Page =
@@ -78,6 +92,18 @@ const titles: Record<Page, string> = {
   moderation: "Модерация",
   manage: "Басқару",
   notifications: "Хабарламалар",
+};
+/** Audit-log action wording (Kazakh) for the moderation history. */
+const logActionLabels: Record<string, string> = {
+  hide: "Жазбаны жасырды",
+  restore: "Жазбаны қалпына келтірді",
+  delete: "Жазбаны өшірді",
+  hide_comment: "Пікірді жасырды",
+  restore_comment: "Пікірді қалпына келтірді",
+  delete_comment: "Пікірді өшірді",
+  report_reviewing: "Шағымды қарауға алды",
+  report_resolved: "Шағымды шешті",
+  report_dismissed: "Шағымды қайтарды",
 };
 export default function Maxball() {
   const [data, setData] = useState<Boot | null>(null);
@@ -104,6 +130,24 @@ export default function Maxball() {
     null,
   );
   const [manageTab, setManageTab] = useState("people");
+  const [modTab, setModTab] = useState<
+    "overview" | "reports" | "hidden" | "history"
+  >("overview");
+  const [reportStatusFilter, setReportStatusFilter] = useState("all");
+  const [reportReasonFilter, setReportReasonFilter] = useState("all");
+  const [reportLimit, setReportLimit] = useState(8);
+  const [logActionFilter, setLogActionFilter] = useState("all");
+  const [logModeratorFilter, setLogModeratorFilter] = useState("all");
+  const [logLimit, setLogLimit] = useState(10);
+  const [dashHide, setDashHide] = useState<{
+    targetType: "post" | "comment";
+    targetId: string;
+  } | null>(null);
+  const [dashConfirm, setDashConfirm] = useState<{
+    title: string;
+    message: string;
+    run: () => Promise<void>;
+  } | null>(null);
   const [catalogEdit, setCatalogEdit] = useState<{
     kind: "course" | "teacher";
     item: { id: string; name: string; active: boolean; subject?: string };
@@ -356,7 +400,10 @@ export default function Maxball() {
   const manager = isManager(data.viewer?.role);
   const unread = data.notifications.filter((n) => !n.read).length;
   const publicPosts = data.posts.filter((p) => !p.hidden);
-  const feedPage = ["feed", "mine", "saved", "moderation"].includes(page);
+  const feedPage = ["feed", "mine", "saved"].includes(page);
+  const moderationAttention =
+    data.posts.filter((p) => p.flagged).length +
+    (data.moderation?.counts.newReports ?? 0);
   const nav = [
     { id: "feed" as Page, icon: LayoutGrid, label: "Кері байланыс" },
     { id: "mine" as Page, icon: FileText, label: "Менің жазбаларым" },
@@ -475,10 +522,8 @@ export default function Maxball() {
                   >
                     <ShieldCheck size={19} />
                     Модерация
-                    {data.posts.filter((p) => p.flagged).length > 0 && (
-                      <small>
-                        {data.posts.filter((p) => p.flagged).length}
-                      </small>
+                    {moderationAttention > 0 && (
+                      <small>{moderationAttention}</small>
                     )}
                   </button>
                   {data.viewer?.role === "leadership" && (
@@ -533,11 +578,11 @@ export default function Maxball() {
                         ? "Білімге бағыт берген жандар"
                         : page === "stats"
                           ? "Кері байланыстың жалпы көрінісі"
-                          : page === "manage"
-                            ? "Адамдар, курстар және оқытушылар"
-                            : page === "moderation"
-                              ? "Тексеруді қажет ететін жазбалар"
-                              : page === "mine"
+                            : page === "manage"
+                              ? "Адамдар, курстар және оқытушылар"
+                              : page === "moderation"
+                                ? "Шағымдар, жасырылған мазмұн және модерация тарихы"
+                                : page === "mine"
                                 ? "Өзіңіз қалдырған кері байланыс"
                                 : page === "saved"
                                   ? "Кейін оралатын жазбалар"
@@ -1357,6 +1402,418 @@ export default function Maxball() {
                 )}
               </section>
             )}
+            {page === "moderation" && data.moderation && (
+              <section className="moderation-page">
+                <div className="section-tabs">
+                  {(
+                    [
+                      { id: "overview", label: "Шолу", count: 0 },
+                      {
+                        id: "reports",
+                        label: "Шағымдар",
+                        count: data.moderation.reports.length,
+                      },
+                      {
+                        id: "hidden",
+                        label: "Жасырылғандар",
+                        count:
+                          data.moderation.counts.hiddenPosts +
+                          data.moderation.counts.hiddenComments,
+                      },
+                      {
+                        id: "history",
+                        label: "Тарих",
+                        count: data.moderation.log.length,
+                      },
+                    ] as const
+                  ).map((t) => (
+                    <button
+                      key={t.id}
+                      className={modTab === t.id ? "selected" : ""}
+                      onClick={() => setModTab(t.id)}
+                    >
+                      {t.label}
+                      {t.count > 0 && <span>{t.count}</span>}
+                    </button>
+                  ))}
+                </div>
+                {modTab === "overview" && (
+                  <div className="moderation-overview">
+                    <div className="overview-strip">
+                      <div>
+                        <span className="metric-icon blue">
+                          <Flag size={19} />
+                        </span>
+                        <span>
+                          <strong>{data.moderation.counts.newReports}</strong>
+                          <small>Жаңа шағым</small>
+                        </span>
+                      </div>
+                      <div>
+                        <span className="metric-icon amber">
+                          <Clock3 size={19} />
+                        </span>
+                        <span>
+                          <strong>{data.moderation.counts.pendingReports}</strong>
+                          <small>Қаралуда</small>
+                        </span>
+                      </div>
+                      <div>
+                        <span className="metric-icon green">
+                          <EyeOff size={19} />
+                        </span>
+                        <span>
+                          <strong>{data.moderation.counts.hiddenPosts}</strong>
+                          <small>Жасырылған жазба</small>
+                        </span>
+                      </div>
+                      <div>
+                        <span className="metric-icon blue">
+                          <MessageCircle size={19} />
+                        </span>
+                        <span>
+                          <strong>{data.moderation.counts.hiddenComments}</strong>
+                          <small>Жасырылған пікір</small>
+                        </span>
+                      </div>
+                    </div>
+                    <div className="mod-panel">
+                      <div className="section-label">
+                        <h3>Соңғы әрекеттер</h3>
+                        <button
+                          className="text-btn"
+                          onClick={() => setModTab("history")}
+                        >
+                          Барлық тарих
+                          <ArrowRight size={15} />
+                        </button>
+                      </div>
+                      {data.moderation.log.slice(0, 5).map((entry) => (
+                        <div className="log-row" key={entry.id}>
+                          <span className={`log-action ${entry.action}`}>
+                            {logActionLabels[entry.action] ?? entry.action}
+                          </span>
+                          <span className="log-target">
+                            {entry.targetNumber
+                              ? `№${entry.targetNumber}`
+                              : entry.targetType === "comment"
+                                ? "пікір"
+                                : "шағым"}
+                          </span>
+                          <span className="log-who">{entry.moderator}</span>
+                          <time>{date(entry.createdAt)}</time>
+                        </div>
+                      ))}
+                      {!data.moderation.log.length && (
+                        <p className="muted small">Әзірге модерация әрекеті жоқ.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {modTab === "reports" && (
+                  <div className="mod-panel">
+                    <div className="filter-row">
+                      <select
+                        aria-label="Мәртебе бойынша сүзгі"
+                        value={reportStatusFilter}
+                        onChange={(e) => {
+                          setReportStatusFilter(e.target.value);
+                          setReportLimit(8);
+                        }}
+                      >
+                        <option value="all">Барлық мәртебе</option>
+                        {Object.entries(reportStatusLabels).map(([s, l]) => (
+                          <option key={s} value={s}>
+                            {l}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="Себеп бойынша сүзгі"
+                        value={reportReasonFilter}
+                        onChange={(e) => {
+                          setReportReasonFilter(e.target.value);
+                          setReportLimit(8);
+                        }}
+                      >
+                        <option value="all">Барлық себеп</option>
+                        {Object.entries(reportReasonLabels).map(([r, l]) => (
+                          <option key={r} value={r}>
+                            {l}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {data.moderation.reports
+                      .filter(
+                        (r) =>
+                          (reportStatusFilter === "all" ||
+                            r.status === reportStatusFilter) &&
+                          (reportReasonFilter === "all" ||
+                            r.reason === reportReasonFilter),
+                      )
+                      .slice(0, reportLimit)
+                      .map((r) => (
+                        <ReportRow
+                          key={r.id}
+                          report={r}
+                          onOpen={() => {
+                            if (r.targetFeedbackId) openPost(r.targetFeedbackId);
+                          }}
+                          onStatus={(status) =>
+                            void quick("setReportStatus", {
+                              targetType: r.targetType,
+                              targetId: r.targetId,
+                              status,
+                            })
+                          }
+                          onHide={() =>
+                            setDashHide({
+                              targetType: r.targetType,
+                              targetId: r.targetId,
+                            })
+                          }
+                          onRestore={() =>
+                            r.targetType === "post"
+                              ? void quick("moderate", {
+                                  id: r.targetId,
+                                  mode: "restore",
+                                })
+                              : void quick("moderateComment", {
+                                  id: r.targetId,
+                                  mode: "restore",
+                                })
+                          }
+                          onDelete={() =>
+                            setDashConfirm({
+                              title: "Мазмұнды толық өшіру",
+                              message:
+                                r.targetType === "post"
+                                  ? "Жазба, пікірлері және файлдары толық өшіріледі. Әрекетті қайтару мүмкін емес."
+                                  : "Пікір толық өшіріледі. Әрекетті қайтару мүмкін емес.",
+                              run: async () => {
+                                await send(
+                                  r.targetType === "post"
+                                    ? "moderate"
+                                    : "moderateComment",
+                                  { id: r.targetId, mode: "delete" },
+                                );
+                                await reload();
+                              },
+                            })
+                          }
+                        />
+                      ))}
+                    {data.moderation.reports
+                      .filter(
+                        (r) =>
+                          (reportStatusFilter === "all" ||
+                            r.status === reportStatusFilter) &&
+                          (reportReasonFilter === "all" ||
+                            r.reason === reportReasonFilter),
+                      ).length > reportLimit && (
+                      <button
+                        className="btn secondary load-more"
+                        onClick={() => setReportLimit((n) => n + 8)}
+                      >
+                        Тағы көрсету
+                        <ChevronDown size={17} />
+                      </button>
+                    )}
+                    {!data.moderation.reports.length && (
+                      <Empty title="Шағым жоқ" />
+                    )}
+                  </div>
+                )}
+                {modTab === "hidden" && (
+                  <div className="mod-panel">
+                    <div className="section-label">
+                      <h3>Жасырылған жазбалар</h3>
+                    </div>
+                    {data.posts
+                      .filter((p) => p.hidden)
+                      .map((p) => (
+                        <div className="log-row hidden-target" key={p.id}>
+                          <span className="log-target">№{p.number}</span>
+                          <span className="log-title">{p.title}</span>
+                          <span className="log-reason">{p.hiddenReason}</span>
+                          <button
+                            className="text-btn"
+                            onClick={() => openPost(p.id)}
+                          >
+                            Ашу
+                          </button>
+                          <button
+                            className="text-btn"
+                            onClick={() =>
+                              void quick("moderate", {
+                                id: p.id,
+                                mode: "restore",
+                              })
+                            }
+                          >
+                            Қалпына келтіру
+                          </button>
+                          <button
+                            className="text-btn danger"
+                            onClick={() =>
+                              setDashConfirm({
+                                title: "Жазбаны толық өшіру",
+                                message:
+                                  "Жазба, пікірлері және файлдары толық өшіріледі. Әрекетті қайтару мүмкін емес.",
+                                run: async () => {
+                                  await send("moderate", {
+                                    id: p.id,
+                                    mode: "delete",
+                                  });
+                                  await reload();
+                                },
+                              })
+                            }
+                          >
+                            Өшіру
+                          </button>
+                        </div>
+                      ))}
+                    {!data.posts.filter((p) => p.hidden).length && (
+                      <p className="muted small">Жасырылған жазба жоқ.</p>
+                    )}
+                    <div className="section-label">
+                      <h3>Жасырылған пікірлер</h3>
+                    </div>
+                    {data.moderation.hiddenComments.map((c) => (
+                      <div className="log-row hidden-target" key={c.id}>
+                        <span className="log-target">
+                          {c.number ? `№${c.number}` : "пікір"}
+                        </span>
+                        <span className="log-title">{c.snippet}</span>
+                        <span className="log-reason">{c.reason}</span>
+                        <button
+                          className="text-btn"
+                          onClick={() => openPost(c.feedbackId)}
+                        >
+                          Ашу
+                        </button>
+                        <button
+                          className="text-btn"
+                          onClick={() =>
+                            void quick("moderateComment", {
+                              id: c.id,
+                              mode: "restore",
+                            })
+                          }
+                        >
+                          Қалпына келтіру
+                        </button>
+                      </div>
+                    ))}
+                    {!data.moderation.hiddenComments.length && (
+                      <p className="muted small">Жасырылған пікір жоқ.</p>
+                    )}
+                  </div>
+                )}
+                {modTab === "history" && (
+                  <div className="mod-panel">
+                    <div className="filter-row">
+                      <select
+                        aria-label="Әрекет бойынша сүзгі"
+                        value={logActionFilter}
+                        onChange={(e) => {
+                          setLogActionFilter(e.target.value);
+                          setLogLimit(10);
+                        }}
+                      >
+                        <option value="all">Барлық әрекет</option>
+                        {Object.entries(logActionLabels).map(([a, l]) => (
+                          <option key={a} value={a}>
+                            {l}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="Модератор бойынша сүзгі"
+                        value={logModeratorFilter}
+                        onChange={(e) => {
+                          setLogModeratorFilter(e.target.value);
+                          setLogLimit(10);
+                        }}
+                      >
+                        <option value="all">Барлық модератор</option>
+                        {[
+                          ...new Set(
+                            data.moderation.log.map((e) => e.moderator),
+                          ),
+                        ].map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {data.moderation.log
+                      .filter(
+                        (e) =>
+                          (logActionFilter === "all" ||
+                            e.action === logActionFilter) &&
+                          (logModeratorFilter === "all" ||
+                            e.moderator === logModeratorFilter),
+                      )
+                      .slice(0, logLimit)
+                      .map((entry) => (
+                        <div className="log-row" key={entry.id}>
+                          <span className={`log-action ${entry.action}`}>
+                            {logActionLabels[entry.action] ?? entry.action}
+                          </span>
+                          <span className="log-target">
+                            {entry.targetType === "post"
+                              ? `№${entry.targetNumber}`
+                              : entry.targetType === "comment"
+                                ? "пікір"
+                                : "шағым"}
+                          </span>
+                          {entry.reason && (
+                            <span className="log-reason">{entry.reason}</span>
+                          )}
+                          <span className="log-state">
+                            {entry.prevState} → {entry.newState}
+                          </span>
+                          <span className="log-who">{entry.moderator}</span>
+                          <time>{date(entry.createdAt)}</time>
+                          {entry.targetFeedbackId && (
+                            <button
+                              className="text-btn"
+                              onClick={() =>
+                                openPost(entry.targetFeedbackId!)
+                              }
+                            >
+                              Ашу
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    {data.moderation.log
+                      .filter(
+                        (e) =>
+                          (logActionFilter === "all" ||
+                            e.action === logActionFilter) &&
+                          (logModeratorFilter === "all" ||
+                            e.moderator === logModeratorFilter),
+                      ).length > logLimit && (
+                      <button
+                        className="btn secondary load-more"
+                        onClick={() => setLogLimit((n) => n + 10)}
+                      >
+                        Тағы көрсету
+                        <ChevronDown size={17} />
+                      </button>
+                    )}
+                    {!data.moderation.log.length && (
+                      <Empty title="Модерация тарихы бос" />
+                    )}
+                  </div>
+                )}
+              </section>
+            )}
             {page === "notifications" && (
               <section className="notifications-page">
                 <div className="list-meta">
@@ -1451,6 +1908,50 @@ export default function Maxball() {
           onReceipt={setReceipt}
         />
       )}</Presence>
+      {dashHide && (
+        <Dialog
+          title={dashHide.targetType === "post" ? "Жазбаны жасыру" : "Пікірді жасыру"}
+          onClose={() => setDashHide(null)}
+        >
+          <Form
+            submit="Жасыру"
+            onSubmit={async (f) => {
+              const target = dashHide;
+              setDashHide(null);
+              try {
+                await send(
+                  target.targetType === "post" ? "moderate" : "moderateComment",
+                  { id: target.targetId, mode: "hide", reason: String(f.get("reason")) },
+                );
+                await reload();
+                toast("Мазмұн жасырылды.");
+              } catch (e) {
+                toast((e as Error).message);
+              }
+            }}
+          >
+            <Field label="Жасыру себебі">
+              <textarea
+                name="reason"
+                required
+                minLength={3}
+                maxLength={1000}
+                rows={2}
+              />
+            </Field>
+          </Form>
+        </Dialog>
+      )}
+      {dashConfirm && (
+        <Confirm
+          title={dashConfirm.title}
+          message={dashConfirm.message}
+          confirmLabel="Өшіру"
+          danger
+          onConfirm={dashConfirm.run}
+          onClose={() => setDashConfirm(null)}
+        />
+      )}
       <Presence show={!!receipt}>{receipt && (
         <Receipt
           result={receipt}
@@ -1527,6 +2028,82 @@ export default function Maxball() {
       <Presence show={!!toastText}>{toastText && <Notice key={toastId} text={toastText} onClose={dismissToast} />}</Presence>
       <Presence show={!!feedback}>{feedback && <SessionFeedback key={feedback.id} feedback={feedback} />}</Presence>
     </>
+  );
+}
+/** One reported-content card in the moderation dashboard. */
+function ReportRow({
+  report: r,
+  onOpen,
+  onStatus,
+  onHide,
+  onRestore,
+  onDelete,
+}: {
+  report: Report;
+  onOpen: () => void;
+  onStatus: (status: "reviewing" | "resolved" | "dismissed") => void;
+  onHide: () => void;
+  onRestore: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className={`report-row status-${r.status}`}>
+      <div className="report-main">
+        <div className="report-head">
+          <span className="tag">
+            {r.targetType === "post" ? "Жазба" : "Пікір"}
+            {r.targetNumber ? ` №${r.targetNumber}` : ""}
+          </span>
+          <span className="report-reason">{reportReasonLabels[r.reason]}</span>
+          <span className={`status ${r.status}`}>
+            {reportStatusLabels[r.status]}
+          </span>
+          <time>{date(r.createdAt)}</time>
+        </div>
+        <p className="report-title">{r.targetTitle}</p>
+        {r.note && <p className="report-note">«{r.note}»</p>}
+        <p className="report-meta">Шағым беруші: {r.reporter}</p>
+      </div>
+      <div className="report-actions">
+        <button
+          className="text-btn"
+          onClick={onOpen}
+          disabled={!r.targetFeedbackId}
+        >
+          Мазмұнды ашу
+        </button>
+        {r.status === "new" && (
+          <button className="text-btn" onClick={() => onStatus("reviewing")}>
+            Қарауда
+          </button>
+        )}
+        {r.status !== "resolved" && (
+          <button className="text-btn" onClick={() => onStatus("resolved")}>
+            Шешілді
+          </button>
+        )}
+        {r.status !== "dismissed" && (
+          <button className="text-btn" onClick={() => onStatus("dismissed")}>
+            Қайтару
+          </button>
+        )}
+        {r.targetType === "post" && r.targetFeedbackId && !r.targetHidden && (
+          <button className="text-btn" onClick={onHide}>
+            Жасыру
+          </button>
+        )}
+        {r.targetType === "post" && r.targetFeedbackId && r.targetHidden && (
+          <button className="text-btn" onClick={onRestore}>
+            Қалпына келтіру
+          </button>
+        )}
+        {r.targetFeedbackId && (
+          <button className="text-btn danger" onClick={onDelete}>
+            Өшіру
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 function PostCard({

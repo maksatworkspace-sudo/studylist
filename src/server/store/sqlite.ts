@@ -42,11 +42,14 @@ const tablesV1: Record<Table, Record<string, ColumnKind>> = {
   moderation_flags: { id: "text", feedback_id: "text", reason: "text", source: "text", created_at: "text" },
   rate_limits: { key: "text", count: "integer", resets_at: "text" },
   submissions: { key: "text", feedback_id: "text" },
+  reports: { reporter_key: "text", target_type: "text", target_id: "text", reason: "text", note: "text", status: "text", handled_by: "text", created_at: "text", updated_at: "text" },
+  moderation_log: { id: "text", moderator_id: "text", action: "text", target_type: "text", target_id: "text", target_feedback_id: "text", target_number: "integer", reason: "text", prev_state: "text", new_state: "text", created_at: "text" },
 };
 
 const tables: Record<Table, Record<string, ColumnKind>> = {
   ...tablesV1,
   guest_grants: { ...tablesV1.guest_grants, explicit_unlock: "boolean" },
+  comments: { ...tablesV1.comments, hidden: "boolean", hidden_reason: "text" },
 };
 
 const SQLITE_TYPE: Record<ColumnKind, string> = {
@@ -133,6 +136,34 @@ export async function openSqliteStore(path?: string): Promise<SqliteStore> {
       );
       await manager.query(
         "INSERT INTO store_migrations(version, applied_at) VALUES (2, ?)",
+        [new Date().toISOString()],
+      );
+    }
+    const moderationMigration = await manager.query(
+      "SELECT version FROM store_migrations WHERE version = 3",
+    );
+    if (moderationMigration.length === 0) {
+      // Per-comment moderation columns and the reporting/audit tables.
+      // Both new columns stay nullable: rows written before v3 simply read
+      // as visible comments.
+      await manager.query("ALTER TABLE comments ADD COLUMN hidden INTEGER");
+      await manager.query(
+        "ALTER TABLE comments ADD COLUMN hidden_reason TEXT",
+      );
+      await manager.query(
+        `CREATE TABLE IF NOT EXISTS "reports" (`
+          + `"reporter_key" TEXT, "target_type" TEXT, "target_id" TEXT, "reason" TEXT, `
+          + `"note" TEXT, "status" TEXT, "handled_by" TEXT, "created_at" TEXT, "updated_at" TEXT, `
+          + `PRIMARY KEY ("reporter_key", "target_type", "target_id"))`,
+      );
+      await manager.query(
+        `CREATE TABLE IF NOT EXISTS "moderation_log" (`
+          + `"id" TEXT PRIMARY KEY, "moderator_id" TEXT, "action" TEXT, "target_type" TEXT, `
+          + `"target_id" TEXT, "target_feedback_id" TEXT, "target_number" INTEGER, "reason" TEXT, `
+          + `"prev_state" TEXT, "new_state" TEXT, "created_at" TEXT)`,
+      );
+      await manager.query(
+        "INSERT INTO store_migrations(version, applied_at) VALUES (3, ?)",
         [new Date().toISOString()],
       );
     }

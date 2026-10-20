@@ -5,7 +5,10 @@ import {
   isManager,
   type Boot,
   type Detail,
+  type Moderation,
+  type ModerationEntry,
   type Post,
+  type Report,
   type Statistics,
   type Teacher,
   type Viewer,
@@ -71,7 +74,10 @@ export async function posts(ctx: Context, id?: string): Promise<Post[]> {
         updatedAt: iso(f.updated_at),
         supports: supports.filter((s) => s.feedback_id === f.id).length,
         comments: comments.filter(
-          (c) => c.feedback_id === f.id && !c.deleted,
+          (c) =>
+            c.feedback_id === f.id &&
+            !c.deleted &&
+            (!c.hidden || manager),
         ).length,
         supported:
           !!ctx.viewer &&
@@ -138,14 +144,23 @@ export async function detail(ctx: Context, id: string): Promise<Detail> {
         .sort(byTime)
         .map((c) => {
           const profile = profiles.find((p) => p.id === c.profile_id);
+          const masked = Boolean(c.hidden) && !isManager(ctx.viewer?.role);
           return {
             id: String(c.id),
-            name: c.deleted ? "Өшірілген пікір" : String(profile?.name),
+            name: c.deleted
+              ? "Өшірілген пікір"
+              : masked
+                ? "Жасырылған пікір"
+                : String(profile?.name),
             role: profile?.role as Detail["comments"][number]["role"],
-            body: c.deleted ? "" : String(c.body),
+            body: c.deleted || masked ? "" : String(c.body),
             parentId: (c.parent_id as string) ?? null,
             mine: !!ctx.viewer && c.profile_id === ctx.viewer.id,
             deleted: Boolean(c.deleted),
+            hidden: Boolean(c.hidden),
+            hiddenReason: isManager(ctx.viewer?.role)
+              ? ((c.hidden_reason as string) ?? null)
+              : null,
             createdAt: iso(c.created_at),
           };
         }),
@@ -423,6 +438,9 @@ export async function boot(
       stats: isManager(ctx.viewer?.role)
         ? await statistics(ctx, from, to)
         : null,
+      moderation: isManager(ctx.viewer?.role)
+        ? await moderation(ctx)
+        : null,
       integrations: isManager(ctx.viewer?.role)
         ? {
             email: Boolean(process.env.SMTP_PASS),
@@ -452,4 +470,108 @@ export async function accessibleAttachment(ctx: Context, id: string) {
     object_path: String(row.object_path),
     size: Number(row.size),
   };
+}
+/**
+ * Manager-only dashboard payload. Reporters surface as display labels only
+ * ("Қонақ" or a profile name they chose to act under); session identifiers
+ * and guest keys never leave the server. Targets surface content fields
+ * (number, title) — never author identity, keeping anonymous authors
+ * anonymous inside the moderation interfaces themselves.
+ */
+export async function moderation(ctx: Context): Promise<Moderation> {
+  if (!isManager(ctx.viewer?.role))
+    throw new AppError("Тек басқару қызметіне арналған.", 403);
+  const repo = ctx.store;
+  const [reports, log, feedback, comments, profiles] = await Promise.all([
+    repo.all("reports"),
+    repo.all("moderation_log"),
+    repo.all("feedback"),
+    repo.all("comments"),
+    repo.all("profiles"),
+  ]);
+  const nameOf = (key: string) => {
+    if (!key.startsWith("user:")) return "Қонақ";
+    const profile = profiles.find((p) => p.id === key.slice(5));
+    return profile ? String(profile.name) : "Қолданушы";
+  };
+  const moderatorName = (id: string) => {
+    const profile = profiles.find((p) => p.id === id);
+    return profile ? String(profile.name) : "Әкімші";
+  };
+  return JSON.parse(
+    JSON.stringify({
+      reports: reports
+        .map((r) => {
+          const targetType = String(r.target_type) as "post" | "comment";
+          const post =
+            targetType === "post"
+              ? feedback.find((f) => f.id === r.target_id)
+              : feedback.find(
+                  (f) =>
+                    f.id ===
+                    comments.find((c) => c.id === r.target_id)?.feedback_id,
+                );
+          return {
+            // Client-facing identity uses content + time only: reporter keys
+            // (and the session hashes inside guest keys) never leave the server.
+            id: `${r.target_type}|${r.target_id}|${String(r.created_at)}`,
+            targetType,
+            targetId: String(r.target_id),
+            reason: r.reason as Report["reason"],
+            note: String(r.note ?? ""),
+            status: r.status as Report["status"],
+            reporter: nameOf(String(r.reporter_key)),
+            targetNumber: post ? Number(post.number) : null,
+            targetFeedbackId: post ? String(post.id) : null,
+            targetTitle: post
+              ? String(post.title)
+              : targetType === "post"
+                ? "Өшірілген жазба"
+                : "Өшірілген пікір",
+            targetHidden: post ? Boolean(post.hidden) : false,
+            createdAt: iso(r.created_at),
+            updatedAt: iso(r.updated_at),
+          } satisfies Report;
+        })
+        .sort(
+          (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
+        ),
+      log: log
+        .map((entry) => ({
+          id: String(entry.id),
+          action: String(entry.action),
+          targetType: entry.target_type as ModerationEntry["targetType"],
+          targetId: String(entry.target_id),
+          targetNumber: entry.target_number ? Number(entry.target_number) : null,
+          targetFeedbackId: (entry.target_feedback_id as string) ?? null,
+          reason: String(entry.reason ?? ""),
+          prevState: String(entry.prev_state ?? ""),
+          newState: String(entry.new_state ?? ""),
+          moderator: moderatorName(String(entry.moderator_id)),
+          createdAt: iso(entry.created_at),
+        }))
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .slice(0, 200),
+      hiddenComments: comments
+        .filter((c) => c.hidden && !c.deleted)
+        .map((c) => {
+          const post = feedback.find((f) => f.id === c.feedback_id);
+          return {
+            id: String(c.id),
+            feedbackId: String(c.feedback_id),
+            number: post ? Number(post.number) : null,
+            snippet: String(c.body).slice(0, 140),
+            reason: (c.hidden_reason as string) ?? null,
+            createdAt: iso(c.created_at),
+          };
+        })
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)),
+      counts: {
+        newReports: reports.filter((r) => r.status === "new").length,
+        pendingReports: reports.filter((r) => r.status === "reviewing").length,
+        hiddenPosts: feedback.filter((f) => f.hidden && !f.deleted).length,
+        hiddenComments: comments.filter((c) => c.hidden && !c.deleted).length,
+      },
+    } satisfies Moderation),
+  );
 }

@@ -56,6 +56,41 @@ async function lockPost(repo: Store, id: string) {
   if (!row || row.deleted) throw new AppError("Жазба табылмады.", 404);
   return row;
 }
+/**
+ * Audit trail for every moderation decision. Runs INSIDE the mutation's
+ * transaction so the log can never disagree with the store. Entries keep
+ * content identifiers (number, feedback id) but never author identity —
+ * the anonymity promise holds in the log exactly as in the feed.
+ */
+async function logModeration(
+  repo: Store,
+  ctx: Context,
+  entry: {
+    action: string;
+    targetType: "post" | "comment" | "report";
+    targetId: string;
+    targetFeedbackId?: string | null;
+    targetNumber?: number | null;
+    reason?: string;
+    prevState: string;
+    newState: string;
+  },
+) {
+  if (!ctx.viewer) throw new AppError("Модерация үшін кіру қажет.", 401);
+  await repo.insert("moderation_log", {
+    id: randomUUID(),
+    moderator_id: ctx.viewer.id,
+    action: entry.action,
+    target_type: entry.targetType,
+    target_id: entry.targetId,
+    target_feedback_id: entry.targetFeedbackId ?? null,
+    target_number: entry.targetNumber ?? null,
+    reason: entry.reason ?? "",
+    prev_state: entry.prevState,
+    new_state: entry.newState,
+    created_at: now(),
+  });
+}
 export async function action(ctx: Context, name: string, input: unknown) {
   if (name === "createPost") {
     const data = postInput.parse(input);
@@ -581,14 +616,175 @@ export async function action(ctx: Context, name: string, input: unknown) {
     if (data.mode === "hide" && data.reason.length < 3)
       throw new AppError("Жасыру себебін жазыңыз.");
     await ctx.store.transaction(async (repo) => {
-      await lockPost(repo, data.id);
-      if (data.mode === "delete") await deletePost(repo, data.id);
-      else
+      const post = await lockPost(repo, data.id);
+      const before = post.hidden ? "hidden" : "visible";
+      if (data.mode === "delete") {
+        await logModeration(repo, ctx, {
+          action: "delete",
+          targetType: "post",
+          targetId: data.id,
+          targetNumber: Number(post.number),
+          reason: data.reason,
+          prevState: before,
+          newState: "deleted",
+        });
+        await deletePost(repo, data.id);
+      } else {
+        if (data.mode === "hide" && post.hidden)
+          throw new AppError("Жазба әлі жасырылған.", 409);
+        if (data.mode === "restore" && !post.hidden)
+          throw new AppError("Жазба жасырылған жоқ.", 409);
         await repo.update("feedback", data.id, {
           hidden: data.mode === "hide",
           hidden_reason: data.mode === "hide" ? data.reason : null,
           updated_at: now(),
         });
+        await logModeration(repo, ctx, {
+          action: data.mode,
+          targetType: "post",
+          targetId: data.id,
+          targetNumber: Number(post.number),
+          reason: data.reason,
+          prevState: before,
+          newState: data.mode === "hide" ? "hidden" : "visible",
+        });
+      }
+    });
+    return { ok: true };
+  }
+  if (name === "moderateComment") {
+    requireManager(ctx);
+    const data = z
+      .object({
+        id,
+        mode: z.enum(["hide", "restore", "delete"]),
+        reason: z.string().trim().max(1000).default(""),
+      })
+      .parse(input);
+    if (data.mode === "hide" && data.reason.length < 3)
+      throw new AppError("Жасыру себебін жазыңыз.");
+    await ctx.store.transaction(async (repo) => {
+      const comment = await repo.get("comments", data.id);
+      if (!comment || comment.deleted)
+        throw new AppError("Пікір табылмады.", 404);
+      // Moderating a comment never touches its post: the lock below only
+      // proves the post still exists, the update targets the comment row.
+      await lockPost(repo, String(comment.feedback_id));
+      const before = comment.hidden ? "hidden" : "visible";
+      if (data.mode === "delete") {
+        await logModeration(repo, ctx, {
+          action: "delete_comment",
+          targetType: "comment",
+          targetId: data.id,
+          targetFeedbackId: String(comment.feedback_id),
+          reason: data.reason,
+          prevState: before,
+          newState: "deleted",
+        });
+        await repo.update("comments", data.id, {
+          deleted: true,
+          body: "",
+          updated_at: now(),
+        });
+        return;
+      }
+      if (data.mode === "hide" && comment.hidden)
+        throw new AppError("Пікір әлі жасырылған.", 409);
+      if (data.mode === "restore" && !comment.hidden)
+        throw new AppError("Пікір жасырылған жоқ.", 409);
+      await repo.update("comments", data.id, {
+        hidden: data.mode === "hide",
+        hidden_reason: data.mode === "hide" ? data.reason : null,
+        updated_at: now(),
+      });
+      await logModeration(repo, ctx, {
+        action: data.mode === "hide" ? "hide_comment" : "restore_comment",
+        targetType: "comment",
+        targetId: data.id,
+        targetFeedbackId: String(comment.feedback_id),
+        reason: data.reason,
+        prevState: before,
+        newState: data.mode === "hide" ? "hidden" : "visible",
+      });
+    });
+    return { ok: true };
+  }
+  if (name === "report") {
+    const data = z
+      .object({
+        targetType: z.enum(["post", "comment"]),
+        targetId: id,
+        reason: z.enum(["spam", "harassment", "inappropriate", "other"]),
+        note: z.string().trim().max(1000).default(""),
+      })
+      .parse(input);
+    await rateLimit(ctx.store, `report:${ctx.ip}`, 10, 600);
+    // Only content the reporter can actually see may be reported, and a
+    // report never changes visibility — it only queues manager attention.
+    let feedbackId = data.targetId;
+    if (data.targetType === "comment") {
+      const comment = await ctx.store.get("comments", data.targetId);
+      if (!comment || comment.deleted)
+        throw new AppError("Пікір табылмады.", 404);
+      feedbackId = String(comment.feedback_id);
+    }
+    await detail(ctx, feedbackId);
+    const reporterKey = ctx.viewer
+      ? `user:${ctx.viewer.id}`
+      : `guest:${ctx.sessionHash}`;
+    const key = `${reporterKey}|${data.targetType}|${data.targetId}`;
+    const existing = await ctx.store.get("reports", key);
+    if (existing)
+      return { ok: true, duplicate: true };
+    await ctx.store.insert("reports", {
+      reporter_key: reporterKey,
+      target_type: data.targetType,
+      target_id: data.targetId,
+      reason: data.reason,
+      note: data.note,
+      status: "new",
+      handled_by: null,
+      created_at: now(),
+      updated_at: now(),
+    });
+    return { ok: true };
+  }
+  if (name === "setReportStatus") {
+    requireManager(ctx);
+    const data = z
+      .object({
+        targetType: z.enum(["post", "comment"]),
+        targetId: id,
+        status: z.enum(["reviewing", "resolved", "dismissed"]),
+      })
+      .parse(input);
+    await ctx.store.transaction(async (repo) => {
+      const rows = await repo.find("reports", {
+        target_type: data.targetType,
+        target_id: data.targetId,
+      });
+      if (!rows.length) throw new AppError("Шағым табылмады.", 404);
+      for (const report of rows) {
+        const before = String(report.status);
+        await repo.update(
+          "reports",
+          `${report.reporter_key}|${data.targetType}|${data.targetId}`,
+          {
+            status: data.status,
+            handled_by: ctx.viewer!.id,
+            updated_at: now(),
+          },
+        );
+        await logModeration(repo, ctx, {
+          action: `report_${data.status}`,
+          targetType: "report",
+          targetId: String(report.target_id),
+          targetFeedbackId:
+            data.targetType === "post" ? data.targetId : null,
+          prevState: before,
+          newState: data.status,
+        });
+      }
     });
     return { ok: true };
   }

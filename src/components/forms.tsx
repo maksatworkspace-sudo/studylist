@@ -11,8 +11,8 @@ import {
   KeyRound,
   Send,
 } from "lucide-react";
-import type { Boot, FeedbackType, Teacher } from "@/lib/types";
-import { roleLabels, typeLabels } from "@/lib/types";
+import type { Boot, FeedbackType, ReportReason, Teacher } from "@/lib/types";
+import { roleLabels, typeLabels, reportReasonLabels } from "@/lib/types";
 import { send, size, uploadFile, type Result } from "@/lib/client";
 import { CopyButton, Dialog, Field, Form } from "./ui";
 
@@ -296,6 +296,70 @@ export function Compose({
   );
 }
 
+/**
+ * Content reporting for posts and comments. Available to every visitor —
+ * guests included — because reporting never changes visibility; it only
+ * queues the moderation dashboard. Duplicate submissions are acknowledged,
+ * not punished.
+ */
+export function ReportDialog({
+  targetType,
+  targetId,
+  onClose,
+  onDone,
+}: {
+  targetType: "post" | "comment";
+  targetId: string;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  return (
+    <Dialog title="Шағым беру" onClose={onClose}>
+      <Form
+        submit="Жіберу"
+        onSubmit={async (f) => {
+          const result = await send("report", {
+            targetType,
+            targetId,
+            reason: String(f.get("reason")) as ReportReason,
+            note: f.get("note") ? String(f.get("note")) : "",
+          });
+          onClose();
+          onDone(
+            result.duplicate
+              ? "Бұл мазмұн туралы шағымыңыз бұрын тіркелген."
+              : "Шағым жіберілді. Модерация қарайды.",
+          );
+        }}
+      >
+        <Field label="Себебі">
+          <div className="radio-group" role="radiogroup" aria-label="Шағым себебі">
+            {(Object.keys(reportReasonLabels) as ReportReason[]).map((value, index) => (
+              <label key={value} className="radio-option">
+                <input
+                  type="radio"
+                  name="reason"
+                  value={value}
+                  required
+                  defaultChecked={index === 0}
+                />
+                {reportReasonLabels[value]}
+              </label>
+            ))}
+          </div>
+        </Field>
+        <Field label="Толықтыру (қалау бойынша)">
+          <textarea
+            name="note"
+            maxLength={1000}
+            rows={2}
+            placeholder="Не болғанын жазыңыз"
+          />
+        </Field>
+      </Form>
+    </Dialog>
+  );
+}
 export function Receipt({
   result,
   onClose,

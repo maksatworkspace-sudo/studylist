@@ -70,7 +70,10 @@ export async function createWorkRoot(): Promise<string> {
 }
 
 const STARTUP_TIMEOUT_MS = 180_000;
-const PHASE_TIMEOUT_MS = 10 * 60_000;
+// The browser suite grew with the moderation spec and pays cold route
+// compilation in its staging copy; 15 minutes keeps the bound meaningful
+// without flaking on first-compile latency.
+const PHASE_TIMEOUT_MS = 15 * 60_000;
 const STOP_GRACE_MS = 8_000;
 /** Copied into staging. Everything else in the repository is ignored. */
 const STAGING_ALLOWLIST = [

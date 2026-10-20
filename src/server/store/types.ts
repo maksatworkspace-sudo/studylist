@@ -29,7 +29,9 @@ export type Table =
   | "jobs"
   | "moderation_flags"
   | "rate_limits"
-  | "submissions";
+  | "submissions"
+  | "reports"
+  | "moderation_log";
 
 export type Row = Record<string, unknown>;
 
@@ -94,6 +96,10 @@ export const primaryKeys: Record<Table, readonly string[]> = {
   moderation_flags: ["id"],
   rate_limits: ["key"],
   submissions: ["key"],
+  // One report per reporter per target; the composite key IS the identity,
+  // so duplicate submissions resolve to the same row instead of piling up.
+  reports: ["reporter_key", "target_type", "target_id"],
+  moderation_log: ["id"],
 };
 
 export function rowKey(table: Table, row: Partial<Row>): string {
@@ -173,4 +179,9 @@ export const references: Partial<
     { table: "feedback", column: "feedback_id", onDelete: "cascade" },
   ],
   submissions: [{ table: "feedback", column: "feedback_id", onDelete: "cascade" }],
+  // Reports and audit entries deliberately carry no foreign keys: report
+  // targets span two tables (validated in the action layer), and the audit
+  // log must survive the deletion of the content it describes.
+  reports: [],
+  moderation_log: [],
 };

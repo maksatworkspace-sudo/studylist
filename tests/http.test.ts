@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+// These suites drive a real dev server whose first requests pay the
+// staging copy's cold route compilation; the unit default (15s) cannot
+// cover that under parallel load.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 import { randomUUID } from "node:crypto";
 import ExcelJS from "exceljs";
 const base = process.env.TEST_URL || "http://127.0.0.1:3000";

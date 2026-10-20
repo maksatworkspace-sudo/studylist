@@ -476,6 +476,9 @@ components:
             - setStatus
             - resolution
             - moderate
+            - moderateComment
+            - report
+            - setReportStatus
             - readNotifications
             - addCourse
             - addTeacher
@@ -511,8 +514,11 @@ components:
         parentId: { type: [string, "null"], format: uuid }
         status: { $ref: "#/components/schemas/Status" }
         outcome: { type: string }
-        mode: { type: string, enum: [hide, unhide] }
+        mode: { type: string, enum: [hide, restore, delete] }
         reason: { type: string }
+        targetType: { type: string, enum: [post, comment] }
+        targetId: { type: string, format: uuid }
+        note: { type: string, maxLength: 1000 }
         subject: { type: string }
         color: { type: string }
         active: { type: boolean }

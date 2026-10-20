@@ -259,6 +259,53 @@ export function Empty({
     </div>
   );
 }
+/**
+ * Confirmation for destructive or irreversible actions — replaces the old
+ * native confirm() so the flow is styled, focus-trapped and testable.
+ */
+export function Confirm({
+  title,
+  message,
+  confirmLabel = "Растау",
+  danger = false,
+  onConfirm,
+  onClose,
+}: {
+  title: string;
+  message: ReactNode;
+  confirmLabel?: string;
+  danger?: boolean;
+  onConfirm: () => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Dialog title={title} onClose={onClose}>
+      <p className="confirm-message">{message}</p>
+      <div className="dialog-actions">
+        <button className="btn secondary" onClick={onClose} disabled={busy}>
+          Бас тарту
+        </button>
+        <button
+          className={`btn ${danger ? "danger" : "primary"}`}
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onConfirm();
+              onClose();
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? <LoaderCircle className="spin" size={16} /> : null}
+          {confirmLabel}
+        </button>
+      </div>
+    </Dialog>
+  );
+}
 export function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);

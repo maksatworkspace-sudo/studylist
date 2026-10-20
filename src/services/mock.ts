@@ -1,5 +1,19 @@
 import { z } from "zod";
-import type { Boot, Comment, Detail, Post, Role, Statistics, Teacher, Viewer } from "@/lib/types";
+import type {
+  Boot,
+  Comment,
+  Detail,
+  Moderation,
+  ModerationEntry,
+  Post,
+  Report,
+  ReportReason,
+  ReportStatus,
+  Role,
+  Statistics,
+  Teacher,
+  Viewer,
+} from "@/lib/types";
 import { isManager } from "@/lib/types";
 import type { AppService, DateRange, Result } from "./types";
 import { ServiceError } from "./types";
@@ -10,6 +24,14 @@ type Entry = {
   supports: Set<string>; bookmarks: Set<string>;
   replies: Detail["replies"]; history: Detail["history"];
   comments: (Comment & { owner: string })[];
+};
+type MockReport = {
+  reporter: string; targetType: "post" | "comment"; targetId: string;
+  reason: ReportReason; note: string; status: ReportStatus;
+  createdAt: string; updatedAt: string;
+};
+type MockLog = Omit<ModerationEntry, "moderator" | "targetNumber" | "targetFeedbackId"> & {
+  moderatorId: string; targetNumber: number | null; targetFeedbackId: string | null;
 };
 type CatalogTeacher = { id: string; name: string; subject: string; active: boolean; color: string; profileId?: string };
 type Rating = { teacher: string; person: string; stars: number; comment: string; date: string };
@@ -49,6 +71,8 @@ export function createMockService(options: MockOptions = {}): MockService {
   let files: FileRecord[];
   let notices: (Boot["notifications"][number] & { owner: string })[];
   let grants: Map<string, number>;
+  let reports: MockReport[];
+  let modLog: MockLog[];
   let sessionVersion: number;
   let proofs: Map<string, Proof>;
   let requests: Map<string, Result>;
@@ -99,6 +123,27 @@ export function createMockService(options: MockOptions = {}): MockService {
       title: "MAXBALL сынақ ортасына қош келдіңіз", read: false, createdAt: timestamp,
     }];
     grants = new Map(); sessionVersion = 0; proofs = new Map(); requests = new Map(); failures = new Map();
+    reports = options.empty ? [] : [
+      { reporter: mockId(2), targetType: "post", targetId: mockId(1003), reason: "spam",
+        note: "Мазмұны қайталанып келеді.", status: "new", createdAt: timestamp, updatedAt: timestamp },
+    ];
+    modLog = [];
+    if (!options.empty) {
+      // One pre-hidden comment so the moderation dashboard demos every
+      // section without a live manager action (mirrors the server seed).
+      entries[0].comments.push({
+        id: mockId(4001), owner: mockId(2), name: people[1].name, role: "user",
+        body: "Артық эмоционалды пікір (сынақ жазбасы)", parentId: null,
+        mine: false, deleted: false, hidden: true,
+        hiddenReason: "Талқылау ережелерін бұзады", createdAt: timestamp,
+      });
+      modLog.push({
+        id: mockId(6001), moderatorId: mockId(4), action: "hide_comment",
+        targetType: "comment", targetId: mockId(4001), reason: "Талқылау ережелерін бұзады",
+        prevState: "visible", newState: "hidden", createdAt: timestamp,
+        targetNumber: null, targetFeedbackId: mockId(1001),
+      });
+    }
   }
   reset();
   const viewer = () => people.find((p) => p.id === viewerId && p.active) || null;
@@ -120,6 +165,21 @@ export function createMockService(options: MockOptions = {}): MockService {
   };
   const accountOwned = (entry: Entry) => Boolean(entry.owner && entry.owner === viewer()?.id);
   const owned = (entry: Entry) => accountOwned(entry) || (grants.get(entry.post.id) || 0) > Date.now();
+  function logAction(
+    moderatorId: string,
+    action: string,
+    targetType: "post" | "comment" | "report",
+    targetId: string,
+    reason: string,
+    prevState: string,
+    newState: string,
+    targetFeedbackId: string | null,
+    targetNumber: number | null,
+  ) {
+    modLog.unshift({ id: nextId(), moderatorId, action, targetType, targetId,
+      reason, prevState, newState, createdAt: timestamp,
+      targetFeedbackId, targetNumber });
+  }
   function entry(id: unknown, checkVisibility = true): Entry {
     const result = entries.find((e) => e.post.id === uuid(id));
     if (!result || checkVisibility && result.post.hidden && !owned(result) && !isManager(viewer()?.role))
@@ -133,7 +193,10 @@ export function createMockService(options: MockOptions = {}): MockService {
     return clone({ ...item.post,
       course: course?.name || null, teacher: teacher?.name || null,
       authorName: item.post.anonymous ? "Анонимді автор" : item.post.authorName,
-      supports: item.supports.size, comments: item.comments.filter((c) => !c.deleted).length,
+      supports: item.supports.size,
+      comments: item.comments.filter(
+        (c) => !c.deleted && (!c.hidden || isManager(person?.role)),
+      ).length,
       supported: Boolean(person && item.supports.has(person.id)), saved: Boolean(person && item.bookmarks.has(person.id)),
       isAccountOwner: accountOwned(item), isOwner: owned(item), canEdit: owned(item) && !item.replies.length,
       answered: Boolean(item.replies.length), flagged: isManager(person?.role) && item.post.flagged,
@@ -189,15 +252,79 @@ export function createMockService(options: MockOptions = {}): MockService {
       contact: isManager(viewer()?.role) && !item.post.anonymous && person ? { email: person.email, phone: person.phone } : null,
       moderationReasons: isManager(viewer()?.role) && item.post.flagged ? ["Сынақ модерация белгісі"] : [],
       replies: item.replies,
-      comments: item.comments.map(({ owner, ...comment }) => ({ ...comment, mine: owner === viewer()?.id,
-        name: comment.deleted ? "Өшірілген пікір" : people.find((p) => p.id === owner)!.name,
-        body: comment.deleted ? "" : comment.body })),
+      comments: item.comments.map(({ owner, ...comment }) => {
+        const masked = comment.hidden && !isManager(viewer()?.role);
+        return { ...comment, mine: owner === viewer()?.id,
+          name: comment.deleted ? "Өшірілген пікір" : masked ? "Жасырылған пікір"
+            : people.find((p) => p.id === owner)!.name,
+          body: comment.deleted || masked ? "" : comment.body,
+          hiddenReason: isManager(viewer()?.role) ? comment.hiddenReason : null };
+      }),
       attachments: files.filter((f) => f.post === id && f.blob).map(({ id, name, size, mime }) => ({ id, name, size, mime })),
       history: item.history,
     });
   }
   function notify(owner: string, feedbackId: string, title: string) {
     notices.unshift({ id: nextId(), owner, feedbackId, title, read: false, createdAt: timestamp });
+  }
+  function moderationSection(): Moderation {
+    const person = viewer();
+    const label = (id: string) =>
+      id === "guest" ? "Қонақ" : people.find((p) => p.id === id)?.name ?? "Қолданушы";
+    return clone({
+      reports: reports.map((r) => {
+        const targetEntry = r.targetType === "post"
+          ? entries.find((e) => e.post.id === r.targetId)
+          : entries.find((e) => e.comments.some((c) => c.id === r.targetId));
+        return {
+          id: `${r.targetType}|${r.targetId}|${r.createdAt}`,
+          targetType: r.targetType,
+          targetId: r.targetId,
+          reason: r.reason,
+          note: r.note,
+          status: r.status,
+          reporter: label(r.reporter),
+          targetNumber: targetEntry ? targetEntry.post.number : null,
+          targetFeedbackId: targetEntry ? targetEntry.post.id : null,
+          targetTitle: targetEntry ? targetEntry.post.title : "Өшірілген мазмұн",
+          targetHidden: targetEntry ? targetEntry.post.hidden : false,
+          createdAt: r.createdAt,
+          updatedAt: r.updatedAt,
+        } satisfies Report;
+      }),
+      log: modLog.slice(0, 200).map((entry) => ({
+        id: entry.id,
+        action: entry.action,
+        targetType: entry.targetType,
+        targetId: entry.targetId,
+        targetNumber: entry.targetNumber,
+        targetFeedbackId: entry.targetFeedbackId,
+        reason: entry.reason,
+        prevState: entry.prevState,
+        newState: entry.newState,
+        moderator: people.find((p) => p.id === entry.moderatorId)?.name ?? "Әкімші",
+        createdAt: entry.createdAt,
+      }) satisfies ModerationEntry),
+      hiddenComments: entries.flatMap((e) =>
+        e.comments
+          .filter((c) => c.hidden && !c.deleted)
+          .map((c) => ({
+            id: c.id,
+            feedbackId: e.post.id,
+            number: e.post.number,
+            snippet: c.body.slice(0, 140),
+            reason: c.hiddenReason,
+            createdAt: c.createdAt,
+          })),
+      ),
+      counts: {
+        newReports: reports.filter((r) => r.status === "new").length,
+        pendingReports: reports.filter((r) => r.status === "reviewing").length,
+        hiddenPosts: entries.filter((e) => e.post.hidden).length,
+        hiddenComments: entries.filter((e) =>
+          e.comments.some((c) => c.hidden && !c.deleted)).length,
+      },
+    });
   }
   function proof(kind: Proof["kind"], subject: string): Result {
     const localToken = `mock-${kind}-${nextId()}`;
@@ -336,7 +463,8 @@ export function createMockService(options: MockOptions = {}): MockService {
         if (parentId && !item.comments.some((c) => c.id === parentId && !c.parentId && !c.deleted))
           fail("Бір деңгейдегі пікірге ғана жауап беруге болады.");
         const person = user(); item.comments.push({ id: nextId(), owner: person.id, name: person.name,
-          role: person.role, body, parentId, mine: true, deleted: false, createdAt: timestamp });
+          role: person.role, body, parentId, mine: true, deleted: false,
+          hidden: false, hiddenReason: null, createdAt: timestamp });
         return { ok: true };
       }
       if (name === "officialReply") {
@@ -348,8 +476,17 @@ export function createMockService(options: MockOptions = {}): MockService {
       if (name === "moderate") {
         const mode = z.enum(["hide", "restore", "delete"]).parse(d.mode);
         const reason = text(d.reason ?? "", mode === "hide" ? 3 : 0, 1000);
-        if (mode === "delete") remove(item);
-        else { item.post.hidden = mode === "hide"; item.post.hiddenReason = mode === "hide" ? reason : null; }
+        const person = manager();
+        const before = item.post.hidden ? "hidden" : "visible";
+        if (mode === "delete") {
+          logAction(person.id, "delete", "post", item.post.id, reason, before, "deleted",
+            null, item.post.number);
+          remove(item);
+        } else {
+          item.post.hidden = mode === "hide"; item.post.hiddenReason = mode === "hide" ? reason : null;
+          logAction(person.id, mode, "post", item.post.id, reason, before,
+            mode === "hide" ? "hidden" : "visible", null, item.post.number);
+        }
         return { ok: true };
       }
       let status = d.status; let outcome = d.outcome ?? null;
@@ -376,6 +513,65 @@ export function createMockService(options: MockOptions = {}): MockService {
       entry(item!.post.id); const comment = item!.comments.find((c) => c.id === id)!;
       comment.body = name === "deleteComment" ? "" : text(d.body, 1, 5000);
       comment.deleted = name === "deleteComment"; return { ok: true };
+    }
+    if (name === "moderateComment") {
+      const person = manager();
+      const mode = z.enum(["hide", "restore", "delete"]).parse(d.mode);
+      const reason = text(d.reason ?? "", mode === "hide" ? 3 : 0, 1000);
+      const target = uuid(d.id);
+      const owner = entries.find((e) => e.comments.some((c) => c.id === target));
+      const comment = owner?.comments.find((c) => c.id === target);
+      if (!owner || !comment || comment.deleted) fail("Пікір табылмады.", 404);
+      const post = owner!;
+      const row = comment!;
+      const before = row.hidden ? "hidden" : "visible";
+      if (mode === "delete") {
+        row.deleted = true; row.body = "";
+        logAction(person.id, "delete_comment", "comment", target, reason, before,
+          "deleted", post.post.id, null);
+      } else {
+        row.hidden = mode === "hide";
+        row.hiddenReason = mode === "hide" ? reason : null;
+        logAction(person.id, mode === "hide" ? "hide_comment" : "restore_comment",
+          "comment", target, reason, before, mode === "hide" ? "hidden" : "visible",
+          post.post.id, null);
+      }
+      return { ok: true };
+    }
+    if (name === "report") {
+      const targetType = z.enum(["post", "comment"]).parse(d.targetType);
+      const reason = z.enum(["spam", "harassment", "inappropriate", "other"]).parse(d.reason);
+      const note = text(d.note ?? "", 0, 1000);
+      const targetId = uuid(d.targetId);
+      if (targetType === "post") entry(targetId);
+      else {
+        const owner = entries.find((e) =>
+          e.comments.some((c) => c.id === targetId && !c.deleted));
+        if (!owner) fail("Пікір табылмады.", 404);
+        entry(owner!.post.id);
+      }
+      const person = viewer();
+      const reporter = person ? person.id : "guest";
+      if (reports.some((r) => r.reporter === reporter && r.targetType === targetType && r.targetId === targetId))
+        return { ok: true, duplicate: true };
+      reports.push({ reporter, targetType, targetId, reason, note, status: "new",
+        createdAt: timestamp, updatedAt: timestamp });
+      return { ok: true };
+    }
+    if (name === "setReportStatus") {
+      const person = manager();
+      const targetType = z.enum(["post", "comment"]).parse(d.targetType);
+      const status = z.enum(["reviewing", "resolved", "dismissed"]).parse(d.status);
+      const targetId = uuid(d.targetId);
+      const matching = reports.filter((r) => r.targetType === targetType && r.targetId === targetId);
+      if (!matching.length) fail("Шағым табылмады.", 404);
+      for (const report of matching) {
+        const before = report.status;
+        report.status = status; report.updatedAt = timestamp;
+        logAction(person.id, `report_${status}`, "report", targetId, "", before, status,
+          targetType === "post" ? targetId : null, null);
+      }
+      return { ok: true };
     }
     if (name === "rateTeacher") {
       const person = user(); const id = uuid(d.id); const stars = z.number().int().min(1).max(5).parse(d.stars);
@@ -470,6 +666,7 @@ export function createMockService(options: MockOptions = {}): MockService {
         staff: person?.role === "leadership" ? people.map(publicPerson) : [],
         catalog: person?.role === "leadership" ? { courses, teachers: catalog.map(({ id, name, subject, active }) => ({ id, name, subject, active })) } : null,
         stats: isManager(person?.role) ? statistics(range) : null,
+        moderation: isManager(person?.role) ? moderationSection() : null,
         integrations: isManager(person?.role) ? { email: false, ai: false, storage: false } : null,
       });
     }),
