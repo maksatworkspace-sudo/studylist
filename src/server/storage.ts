@@ -1,9 +1,11 @@
-// Storage selection (issues #9/#10). The genuine in-memory repository is the
-// current default backend; the TypeORM + better-sqlite3 file adapter is
-// selected with MAXBALL_ADAPTER=sqlite (+ MAXBALL_SQLITE_PATH, which must
-// live outside the repository). The historical PGlite database at
-// .local/postgres is no longer read or written.
+// Storage selection (issues #9/#10/#11). The TypeORM + better-sqlite3 file
+// store at .local/maxball.sqlite is the default backend; MAXBALL_ADAPTER=memory
+// selects the genuine in-memory repository (process-local by design) and
+// MAXBALL_SQLITE_PATH overrides the file location (outside the repository
+// only, enforced by the verification runner). The historical PGlite database
+// at .local/postgres is never read or written.
 
+import path from "node:path";
 import type { Store } from "./store/types";
 import { MemoryStore } from "./store/memory";
 import { seed } from "./seed";
@@ -14,8 +16,8 @@ export type Adapter = "memory" | "sqlite";
 
 export function requestedAdapter(): Adapter {
   const value = process.env.MAXBALL_ADAPTER;
-  if (value === "sqlite") return "sqlite";
-  return "memory";
+  if (value === "memory") return "memory";
+  return "sqlite";
 }
 
 const globals = globalThis as unknown as { maxballStore?: Promise<Store> };
@@ -29,7 +31,12 @@ async function initialize(): Promise<Store> {
   const adapter = requestedAdapter();
   if (adapter === "sqlite") {
     const { openSqliteStore } = await import("./store/sqlite");
-    const target = await openSqliteStore();
+    // Default lives under the process working directory (.local/), which the
+    // verification runner points at its isolated staging copies.
+    const target = await openSqliteStore(
+      process.env.MAXBALL_SQLITE_PATH ||
+        path.join(process.cwd(), ".local", "maxball.sqlite"),
+    );
     await seed(target);
     return target;
   }

@@ -148,18 +148,16 @@ export function validateEnvironment(env: NodeJS.ProcessEnv): {
   adapter: "memory" | "sqlite";
   sqlitePath?: string;
 } {
-  const adapter = (env.MAXBALL_ADAPTER || "memory") as "memory" | "sqlite";
+  const adapter = (env.MAXBALL_ADAPTER || "sqlite") as "memory" | "sqlite";
   if (!["memory", "sqlite"].includes(adapter))
     throw new VerifyError(
       `MAXBALL_ADAPTER "${adapter}" is not one of memory, sqlite.`,
     );
   if (adapter === "sqlite") {
-    const missing: string[] = [];
-    if (!env.MAXBALL_SQLITE_PATH) missing.push("MAXBALL_SQLITE_PATH");
-    if (missing.length)
-      throw new VerifyError(
-        `sqlite adapter requires: ${missing.join(", ")}. Refusing to run with an incomplete adapter configuration.`,
-      );
+    // Unset path falls back to the staging-local .local/maxball.sqlite
+    // (isolated through the process cwd); an explicit path must live outside
+    // the repository so a run can never touch working-tree state.
+    if (!env.MAXBALL_SQLITE_PATH) return { adapter };
     const target = path.resolve(env.MAXBALL_SQLITE_PATH!);
     const relative = path.relative(repoRoot, target);
     if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)))
@@ -557,11 +555,9 @@ async function runRestartPhase(
   parentEnv: NodeJS.ProcessEnv,
   workRoot: string,
 ): Promise<PhaseResult> {
-  // Persistence across processes requires a file-backed adapter; the genuine
-  // memory repository is process-local by design (issue #9). Until the
-  // issue #10 SQLite adapter is the default this phase reports an explicit
-  // PENDING, never a silent skip.
-  if ((parentEnv.MAXBALL_ADAPTER || "memory") !== "sqlite") {
+  // Persistence across processes requires the file-backed adapter; the
+  // genuine memory repository is process-local by design (issue #9).
+  if ((parentEnv.MAXBALL_ADAPTER || "sqlite") !== "sqlite") {
     return {
       phase: "restart",
       status: "PENDING",

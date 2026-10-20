@@ -41,14 +41,14 @@ describe("verify runner argument parsing", () => {
 });
 
 describe("verify runner environment validation", () => {
-  it("defaults to the genuine memory adapter", () => {
-    expect(validateEnvironment({})).toEqual({ adapter: "memory" });
+  it("defaults to the sqlite file adapter (staging-local database)", () => {
+    expect(validateEnvironment({})).toEqual({ adapter: "sqlite" });
   });
 
-  it("refuses an incomplete sqlite adapter instead of falling back", () => {
-    expect(() => validateEnvironment({ MAXBALL_ADAPTER: "sqlite" })).toThrow(
-      /MAXBALL_SQLITE_PATH/,
-    );
+  it("accepts the sqlite adapter with its staging-local default path", () => {
+    expect(
+      validateEnvironment({ MAXBALL_ADAPTER: "sqlite" }),
+    ).toMatchObject({ adapter: "sqlite" });
   });
 
   it("refuses sqlite paths inside the repository or at .local/postgres", () => {

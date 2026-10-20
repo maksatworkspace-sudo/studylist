@@ -54,12 +54,12 @@ weakened; no forwarded-IP tricks are needed with this isolation.
 
 `MAXBALL_ADAPTER` selects the backend under test:
 
-- `memory` (current default): the genuine in-memory repository from issue #9.
-- `sqlite`: the TypeORM/better-sqlite3 backend from issue #10; requires
-  `MAXBALL_SQLITE_PATH` outside the repository, and the runner refuses
-  incomplete adapter configuration instead of silently falling back. The
-  restart-persistence phase runs against this adapter (CI exercises it with a
-  temp database).
+- `sqlite` (default since #11): the TypeORM/better-sqlite3 backend from
+  issue #10 at `<cwd>/.local/maxball.sqlite` (the runner's staging copies make
+  this per-run isolated); an explicit `MAXBALL_SQLITE_PATH` must live outside
+  the repository. The restart-persistence phase runs against this adapter.
+- `memory`: the genuine in-memory repository from issue #9 — process-local by
+  design, so the restart phase reports an explicit PENDING under it.
 
 Both adapters pass the same behavioral suites (`npm test` runs the memory
 adapter; `npm run test:sqlite` re-runs them on the file store).
