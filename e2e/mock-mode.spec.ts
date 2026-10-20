@@ -12,6 +12,42 @@ async function openComposer(page: import("@playwright/test").Page) {
 const brand = (page: import("@playwright/test").Page) => page.getByRole("button", { name: "MAXBALL EDTECH басты беті" });
 
 test.describe("mockService mode", () => {
+  test("saved counts and account isolation agree with the real-service contract", async ({ page }) => {
+    const requests: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.startsWith("/api/")) requests.push(request.url());
+    });
+    const login = async (email: string) => {
+      await page.getByRole("button", { name: "Кіру", exact: true }).click();
+      const dialog = page.getByRole("dialog");
+      await dialog.locator('input[name="email"]').fill(email);
+      await dialog.locator('input[name="password"]').fill("Mock-Only-2026");
+      await dialog.locator('input[name="password"]').press("Enter");
+      await expect(dialog).toBeHidden();
+      await expect(page.locator(".profile-button")).toBeVisible();
+    };
+    const empty = async () => {
+      await expect(page.locator(".overview-strip strong")).toHaveText(["0", "0", "0"]);
+      await expect(page.locator(".feed-tabs button span")).toHaveText(["0", "0", "0", "0"]);
+      await expect(page.locator(".list-meta")).toContainText("0 жазба");
+    };
+    await page.goto("/");
+    await login("user@maxball.example");
+    await page.getByRole("button", { name: "Сақталғандар", exact: true }).click();
+    await empty();
+    await brand(page).click();
+    await page.locator(".post-card").first().getByRole("button", { name: "Сақтау", exact: true }).click();
+    await page.getByRole("button", { name: "Сақталғандар", exact: true }).click();
+    await expect(page.locator(".overview-strip strong").first()).toHaveText("1");
+    await page.getByLabel("Жазбалардан іздеу", { exact: true }).fill("qa-no-matching-mock-post");
+    await empty();
+    await page.getByRole("button", { name: "Шығу", exact: true }).click();
+    await login("teacher@maxball.example");
+    await page.getByRole("button", { name: "Сақталғандар", exact: true }).click();
+    await empty();
+    expect(requests).toEqual([]);
+  });
+
   test("the full UI works with zero /api requests", async ({ page }) => {
     const apiRequests: string[] = [];
     page.on("request", (request) => {

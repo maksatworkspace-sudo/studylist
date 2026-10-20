@@ -134,6 +134,19 @@ test.describe("independent counts and motion acceptance", () => {
     await counts(page, []);
     await navigation(page, "Кері байланыс");
     await counts(page, publicPosts);
+    const catalog = await state(page);
+    await page.getByRole("button", { name: "Сүзгілер", exact: true }).click();
+    await page.getByLabel("Курс бойынша сүзгі").selectOption(catalog.courses[0].id);
+    await page.getByLabel("Оқытушы бойынша сүзгі").selectOption(catalog.teachers[0].id);
+    const matched = publicPosts.filter((p) => p.courseId === catalog.courses[0].id && p.teacherId === catalog.teachers[0].id);
+    await counts(page, matched);
+    await page.getByLabel("Сұрыптау", { exact: true }).selectOption("popular");
+    await counts(page, matched);
+    const search = page.getByLabel("Жазбалардан іздеу", { exact: true });
+    await search.fill("qa-no-match-a");
+    await search.fill("qa-no-match-b");
+    await search.fill("");
+    await counts(page, matched);
   });
 
   test("failed keyboard login preserves values, errors and focus without success feedback", async ({ page }) => {
@@ -182,11 +195,30 @@ test.describe("independent counts and motion acceptance", () => {
     await expect(dialog).toBeHidden();
     await navigation(page, "Менің жазбаларым");
     await counts(page, (await state(page)).posts.filter((p) => p.isAccountOwner));
+    await navigation(page, "Кері байланыс");
+    let captured = false;
+    let releaseBoot!: () => void;
+    const bootGate = new Promise<void>((resolve) => { releaseBoot = resolve; });
+    await page.route("**/api/state*", async (route) => {
+      if (captured || new URL(route.request().url()).searchParams.has("post")) return route.continue();
+      const response = await route.fetch();
+      captured = true;
+      await bootGate;
+      await route.fulfill({ response });
+    });
+    await page.locator(".post-card").first().getByRole("button", { name: "Сақтау", exact: true }).click();
+    await expect.poll(() => captured).toBe(true);
     await navigation(page, "Шығу");
     await expect(page.getByRole("status").filter({ hasText: "Кездескенше!" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Кері байланыс", exact: true })).toBeVisible();
     await expect(page.locator(".profile-button")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Кіру", exact: true })).toBeVisible();
+    const late = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/state");
+    releaseBoot();
+    await late;
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(page.locator(".profile-button")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Кері байланыс", exact: true })).toBeVisible();
   });
 
   test("dialog motion retains keyboard containment and restores focus after exit", async ({ page }) => {
@@ -204,6 +236,17 @@ test.describe("independent counts and motion acceptance", () => {
     const durations = await dialog.evaluate((node) => getComputedStyle(node).animationDuration.split(",").map((v) => parseFloat(v) * (v.trim().endsWith("ms") ? 1 : 1000)));
     expect(durations.some((duration) => duration >= 250 && duration <= 450)).toBe(true);
     await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await dialog.locator('input[name="email"]').fill("qa-draft@example.invalid");
+    await dialog.getByRole("button", { name: "Жабу", exact: true }).click();
+    // Synthetic re-entry interrupts Presence's exit; it must retain the subtree.
+    await trigger.evaluate((button) => (button as HTMLButtonElement).click());
+    await expect(dialog.locator('input[name="email"]')).toHaveValue("qa-draft@example.invalid");
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    await page.mouse.click(Math.max(1, bounds!.x - 8), Math.max(1, bounds!.y + 10));
     await expect(dialog).toBeHidden();
     await expect(trigger).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
@@ -237,8 +280,9 @@ test.describe("independent counts and motion acceptance", () => {
     const save = card.getByRole("button", { name: "Сақтау", exact: true });
     const selectedBefore = (await save.getAttribute("class")) || "";
     await page.route("**/api/actions", async (route) => {
-      if (route.request().postDataJSON().action !== "toggleBookmark") return route.continue();
-      await route.fulfill({ status: 503, json: { error: "QA: сақтау уақытша қолжетімсіз." } });
+      const name = route.request().postDataJSON().action;
+      if (!["toggleBookmark", "toggleSupport", "rateTeacher"].includes(name)) return route.continue();
+      await route.fulfill({ status: 503, json: { error: `QA: ${name} уақытша қолжетімсіз.` } });
     });
     await save.click();
     await expect(page.getByRole("status").filter({ hasText: "QA:" })).toBeVisible();
@@ -246,9 +290,27 @@ test.describe("independent counts and motion acceptance", () => {
     expect((await save.getAttribute("class")) || "").toBe(selectedBefore);
     expect((await state(page)).posts.filter((p) => p.saved).map((p) => p.id).sort())
       .toEqual(before.posts.filter((p) => p.saved).map((p) => p.id).sort());
+    const support = card.getByRole("button", { name: /^Қолдау:/ });
+    const supportLabel = await support.getAttribute("aria-label");
+    await support.click();
+    await expect(page.getByRole("status").filter({ hasText: "QA: toggleSupport" })).toBeVisible();
+    await expect(page.getByRole("status").filter({ hasText: "QA: toggleBookmark" })).toHaveCount(0);
+    await expect(support).toHaveAttribute("aria-label", supportLabel!);
+    expect((await state(page)).posts.map((p) => [p.id, p.supports, p.supported]))
+      .toEqual(before.posts.map((p) => [p.id, p.supports, p.supported]));
     await page.getByRole("button", { name: "Хабарды жабу", exact: true }).click();
     await expect(page.getByRole("status").filter({ hasText: "QA:" })).toHaveCount(0);
     await navigation(page, "Сақталғандар");
     await counts(page, before.posts.filter((p) => p.saved));
+    await navigation(page, "Оқытушылар");
+    await page.getByRole("button", { name: /Бағалау|Бағаны өзгерту/ }).first().click();
+    const rating = page.getByRole("dialog");
+    await rating.getByRole("button", { name: "5 жұлдыз", exact: true }).click();
+    await rating.getByPlaceholder("Оқытушы туралы ойыңыз").fill("QA preserved rating draft");
+    await rating.getByRole("button", { name: "Бағаны сақтау", exact: true }).click();
+    await expect(rating.getByRole("alert")).toContainText("QA: rateTeacher");
+    await expect(rating.getByPlaceholder("Оқытушы туралы ойыңыз")).toHaveValue("QA preserved rating draft");
+    expect((await state(page)).teachers.map((t) => [t.id, t.myStars, t.myComment]))
+      .toEqual(before.teachers.map((t) => [t.id, t.myStars, t.myComment]));
   });
 });
