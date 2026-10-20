@@ -196,6 +196,37 @@ describe("roles, state transitions and visibility", () => {
       active: true,
     });
   });
+  it("computes statistics on Asia/Almaty day boundaries and excludes reopened issues", async () => {
+    // UTC 2026-10-19 21:30 == Almaty 2026-10-20 03:30; the post belongs to
+    // the Almaty 2026-10-20 bucket, not the UTC day.
+    const created = (await action(
+      user,
+      "createPost",
+      input({ title: "Шекті күн сынағы" }),
+    )) as Created;
+    // A deterministic future Almaty day that no seeded post can occupy.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    const after = new Date(Date.now() + 2 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    // Almaty tomorrow 00:30 == UTC previous day 18:30.
+    const almatyEarly = new Date(`${tomorrow}T00:30:00+06:00`).toISOString();
+    await db.update("feedback", created.id, { created_at: almatyEarly });
+    await action(admin, "setStatus", { id: created.id, status: "resolved" });
+    await db.update("feedback", created.id, {
+      resolved_at: new Date(`${tomorrow}T01:30:00+06:00`).toISOString(),
+    });
+    const day = await statistics(admin, tomorrow, tomorrow);
+    expect(day.total).toBe(1);
+    expect(day.resolved).toBe(1);
+    expect(day.resolutionHours).toBeCloseTo(1, 5);
+    // Exactly one post in the boundary day proves no leak from the adjacent
+    // Almaty days on either side (the UTC date of the timestamp differs).
+    expect((await statistics(admin, after, after)).total).toBe(0);
+    // Reopening removes the issue from resolved aggregates.
+    await action(user, "resolution", { id: created.id, resolved: false });
+    expect((await statistics(admin, tomorrow, tomorrow)).resolved).toBe(0);
+  });
   it("does not enable demo account switching in production", async () => {
     await expect(
       authAction({ ...guest, demo: false }, "demoLogin", {

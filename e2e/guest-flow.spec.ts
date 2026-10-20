@@ -85,6 +85,37 @@ test.describe("guest flow", () => {
     await expect(page.getByText(title).first()).toBeVisible();
   });
 
+  test("guest shares a post link without registration", async ({ page, context }) => {
+    // Force the clipboard share path: headless Chrome exposes navigator.share,
+    // but cannot render its picker; the clipboard fallback is deterministic.
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "share", { value: undefined });
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Жазба қалдыру" }).first().click();
+    const form = page
+      .locator("form")
+      .filter({ has: page.getByPlaceholder("Не туралы айтқыңыз келеді?") })
+      .first();
+    await form.locator('input[name="title"]').fill(`Бөлісу сынағы ${Date.now()}`);
+    await form
+      .getByPlaceholder("Ойыңызды, ұсынысыңызды немесе мәселеңізді жазыңыз")
+      .fill("Сілтемені бөлісу мүмкіндігін тексеру.");
+    await form.locator('input[name="authorName"]').fill("Тексеруші");
+    await form.getByRole("button", { name: "Жариялау" }).click();
+    const receipt = page.getByRole("dialog");
+    await expect(receipt.locator(".secret-code code")).toBeVisible();
+    await receipt.getByRole("button", { name: "Түсінікті" }).click();
+    // The post detail opens automatically; sharing copies the public link.
+    const detail = page.getByRole("dialog");
+    await detail.getByRole("button", { name: "Бөлісу" }).click();
+    await expect(page.getByText("Сілтеме көшірілді.").first()).toBeVisible();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toContain("?post=");
+    await closeOpenDialogs(page);
+  });
+
   test("validation failure preserves typed input", async ({ page }) => {
     await page.goto("/");
     await openComposer(page);
